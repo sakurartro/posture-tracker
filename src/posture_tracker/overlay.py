@@ -11,7 +11,7 @@ from __future__ import annotations
 import tkinter as tk
 from typing import Callable
 
-OVERLAY_TEXT = "Straighten your back! 🧘‍♂️"
+OVERLAY_TEXT = "Straighten your back! "
 OVERLAY_BG = "black"
 OVERLAY_FG = "white"
 OVERLAY_ALPHA = 0.75

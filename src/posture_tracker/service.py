@@ -15,6 +15,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from posture_tracker.storage import DATA_DIR
@@ -138,14 +139,28 @@ def start_background() -> int:
     return process.pid
 
 
-def stop_background() -> bool:
-    """Asks a running tracker to shut down. True if one was running."""
+def stop_background(wait_timeout: float = 10.0) -> bool:
+    """Asks a running tracker to shut down and waits for it. True if one was
+    running.
+
+    Waiting matters: the tracker releases the camera on its way out, and
+    recalibration opens the camera immediately afterwards. Returning while the
+    old process still held the device would fail with "camera busy". It also
+    means --stop only returns once the camera is genuinely free.
+    """
     pid = running_pid()
     if pid is None:
         return False
+
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
-        pass
+        clear_pid_file()
+        return True
+
+    deadline = time.monotonic() + wait_timeout
+    while time.monotonic() < deadline and _process_alive(pid):
+        time.sleep(0.1)
+
     clear_pid_file()
     return True

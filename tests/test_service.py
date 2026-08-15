@@ -96,3 +96,40 @@ def test_running_pid_when_nothing_was_ever_started(paths):
 
 def test_stop_background_reports_when_nothing_runs(paths):
     assert service.stop_background() is False
+
+
+def test_stop_background_waits_for_the_process_to_actually_exit(paths, monkeypatch):
+    # It has to outlive the SIGTERM by a moment, because the tracker releases
+    # the camera on its way out and recalibration opens it straight after.
+    service.write_pid_file(4242)
+
+    signalled: list[tuple[int, int]] = []
+    alive_polls: list[int] = []
+
+    def fake_kill(pid, sig):
+        signalled.append((pid, sig))
+
+    def fake_alive(pid):
+        # Alive for the first couple of polls, then gone.
+        if len(alive_polls) < 2:
+            alive_polls.append(pid)
+            return True
+        return False
+
+    monkeypatch.setattr(service.os, "kill", fake_kill)
+    monkeypatch.setattr(service, "_process_alive", fake_alive)
+
+    assert service.stop_background(wait_timeout=5.0) is True
+    assert signalled and signalled[0][0] == 4242
+    assert len(alive_polls) == 2  # it polled rather than returning immediately
+    assert not service.PID_FILE.exists()
+
+
+def test_stop_background_gives_up_after_the_timeout(paths, monkeypatch):
+    # A wedged process must not hang the command forever.
+    service.write_pid_file(4242)
+    monkeypatch.setattr(service.os, "kill", lambda pid, sig: None)
+    monkeypatch.setattr(service, "_process_alive", lambda pid: True)
+
+    assert service.stop_background(wait_timeout=0.3) is True
+    assert not service.PID_FILE.exists()

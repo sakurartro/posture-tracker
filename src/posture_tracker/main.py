@@ -454,9 +454,9 @@ def cmd_setup(settings: Settings, console: Console, force_calibrate: bool) -> in
         return 0
 
     # A tracker already holding the camera would block calibration.
+    # stop_background waits for it to actually let the device go.
     if service.stop_background():
-        console.print("Stopping the running tracker to recalibrate...")
-        time.sleep(1.0)
+        console.print("Stopped the running tracker to recalibrate.")
 
     try:
         cap = open_camera(settings.camera)
