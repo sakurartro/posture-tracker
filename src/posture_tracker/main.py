@@ -1,20 +1,18 @@
-"""Entry point: wires camera capture, pose detection, Rich dashboard and the
-tkinter overlay together.
+"""Entry point: wires camera capture, head-pose detection, Rich dashboard and
+the tkinter overlay together.
 
 Threading model:
 - Main thread: owns the persistent tkinter root and its mainloop/after()
   polling. tkinter must live on the main thread.
-- Background daemon thread: opens the camera, runs MediaPipe Pose, computes
+- Background daemon thread: opens the camera, runs the face detector, computes
   posture deviations/hysteresis, drives the Rich Live dashboard, and writes
   into a small thread-safe SharedState that the main thread polls to decide
   whether to show the overlay.
 
-Pose detection uses the MediaPipe Tasks API (PoseLandmarker) rather than the
-legacy `mp.solutions.pose` API: the legacy solutions module is no longer
-shipped in current mediapipe pip wheels for Python 3.12 (verified absent in
-both 0.10.35 and 1.0.1). PoseLandmarker needs a small .task model file,
-downloaded once on first run and cached under POSE_MODEL_PATH — no network
-calls happen after that.
+Detection uses MediaPipe's Face Landmarker, which reports the head's 3D
+orientation directly. It needs a small .task model file, downloaded once on
+first run and cached under FACE_MODEL_PATH — no network calls happen after
+that. See detector.py for why this replaced the Pose (whole-body) model.
 """
 
 from __future__ import annotations
@@ -33,24 +31,25 @@ import mediapipe as mp
 from mediapipe.tasks.python import BaseOptions, vision
 from rich.console import Console
 
-from posture_tracker import overlay
+from posture_tracker import camera_check, overlay
 from posture_tracker.config import (
-    MIN_LANDMARK_VISIBILITY,
-    POSE_MODEL_PATH,
-    POSE_MODEL_URL,
-    SHOULDER_MIN_VISIBILITY,
+    CAPTURE_HEIGHT,
+    CAPTURE_WIDTH,
+    FACE_MODEL_PATH,
+    FACE_MODEL_URL,
+    INFERENCE_DOWNSCALE,
     Settings,
     parse_args,
 )
 from posture_tracker.detector import (
     Baseline,
     DeviationSmoother,
+    HeadPose,
     HysteresisTimer,
-    Landmark,
-    PoseLandmarks,
     Status,
     compute_baseline,
     compute_deviation,
+    head_pose_from_matrix,
 )
 from posture_tracker.storage import SessionSummary, save_session
 from posture_tracker.ui import Dashboard, DashboardState
@@ -128,68 +127,92 @@ def open_camera(device: str) -> cv2.VideoCapture:
             f"Could not open camera '{device}'. "
             "Check that the device is connected, accessible, and not in use by another application."
         )
+    # Widescreen, so the driver hands over the sensor's full field of view
+    # instead of a cropped 4:3 window of it. See CAPTURE_WIDTH in config.
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
     return cap
 
 
-def ensure_pose_model(console: Console) -> None:
-    """Downloads the PoseLandmarker .task model on first run and caches it
+def ensure_face_model(console: Console) -> None:
+    """Downloads the Face Landmarker .task model on first run and caches it
     locally. No-op if already present."""
-    if POSE_MODEL_PATH.exists():
+    if FACE_MODEL_PATH.exists():
         return
 
     console.print(
-        f"[cyan]Downloading pose model (one-time, ~6MB) to {POSE_MODEL_PATH}...[/cyan]"
+        f"[cyan]Downloading face model (one-time, ~4MB) to {FACE_MODEL_PATH}...[/cyan]"
     )
-    POSE_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = POSE_MODEL_PATH.with_suffix(".tmp")
+    FACE_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = FACE_MODEL_PATH.with_suffix(".tmp")
     try:
-        urllib.request.urlretrieve(POSE_MODEL_URL, tmp_path)
-        tmp_path.rename(POSE_MODEL_PATH)
+        urllib.request.urlretrieve(FACE_MODEL_URL, tmp_path)
+        tmp_path.rename(FACE_MODEL_PATH)
     except OSError as exc:
         tmp_path.unlink(missing_ok=True)
         raise RuntimeError(
-            f"Could not download the pose model from {POSE_MODEL_URL}: {exc}. "
+            f"Could not download the face model from {FACE_MODEL_URL}: {exc}. "
             "Check your internet connection and try again."
         ) from exc
 
 
-class PoseSource:
-    """Wraps MediaPipe Tasks PoseLandmarker (VIDEO mode) for a single camera
+class FaceSource:
+    """Wraps MediaPipe Tasks FaceLandmarker (VIDEO mode) for a single camera
     stream, tracking a monotonically increasing timestamp as detect_for_video
     requires."""
 
     def __init__(self, model_path):
-        options = vision.PoseLandmarkerOptions(
+        options = vision.FaceLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=str(model_path)),
             running_mode=vision.RunningMode.VIDEO,
-            num_poses=1,
-            min_pose_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
+            num_faces=1,
+            output_facial_transformation_matrixes=True,
         )
-        self._landmarker = vision.PoseLandmarker.create_from_options(options)
+        self._landmarker = vision.FaceLandmarker.create_from_options(options)
         self._start = time.monotonic()
 
-    def detect(self, frame_bgr):
+    def _detect(self, frame_bgr):
+        if INFERENCE_DOWNSCALE > 1:
+            frame_bgr = cv2.resize(
+                frame_bgr, None,
+                fx=1 / INFERENCE_DOWNSCALE, fy=1 / INFERENCE_DOWNSCALE,
+                interpolation=cv2.INTER_AREA,
+            )
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         timestamp_ms = int((time.monotonic() - self._start) * 1000)
         return self._landmarker.detect_for_video(mp_image, timestamp_ms)
 
+    def read_frame(self, cap):
+        """Exposed so the camera preview shares this module's capture path."""
+        return read_fresh_frame(cap)
+
+    def head_pose(self, frame_bgr) -> HeadPose | None:
+        """The head's orientation, or None when no face is really visible."""
+        result = self._detect(frame_bgr)
+        if not result.facial_transformation_matrixes:
+            return None
+        return head_pose_from_matrix(result.facial_transformation_matrixes[0])
+
+    def face_bounds(self, frame_bgr):
+        """Normalized (x0, y0, x1, y1) around the face, or None."""
+        result = self._detect(frame_bgr)
+        if not result.face_landmarks:
+            return None
+        points = result.face_landmarks[0]
+        xs = [p.x for p in points]
+        ys = [p.y for p in points]
+        return min(xs), min(ys), max(xs), max(ys)
+
     def close(self) -> None:
         self._landmarker.close()
 
-    def __enter__(self) -> "PoseSource":
+    def __enter__(self) -> "FaceSource":
         return self
 
     def __exit__(self, *exc_info) -> None:
         self.close()
 
-
-_IDX_NOSE = vision.PoseLandmark.NOSE.value
-_IDX_LEFT_EAR = vision.PoseLandmark.LEFT_EAR.value
-_IDX_RIGHT_EAR = vision.PoseLandmark.RIGHT_EAR.value
-_IDX_LEFT_SHOULDER = vision.PoseLandmark.LEFT_SHOULDER.value
-_IDX_RIGHT_SHOULDER = vision.PoseLandmark.RIGHT_SHOULDER.value
 
 # A grab() that returns faster than this was served from the driver's queue,
 # i.e. it handed back an already-captured (stale) frame. One that takes longer
@@ -223,38 +246,11 @@ def read_fresh_frame(cap: cv2.VideoCapture):
     return frame if ok else None
 
 
-def _read_landmarks(cap: cv2.VideoCapture, pose_source: PoseSource, min_visibility: float) -> PoseLandmarks | None:
+def _read_head_pose(cap: cv2.VideoCapture, face_source: FaceSource) -> HeadPose | None:
     frame = read_fresh_frame(cap)
     if frame is None:
         return None
-
-    result = pose_source.detect(frame)
-    if not result.pose_landmarks:
-        return None
-
-    landmark_list = result.pose_landmarks[0]
-
-    # MediaPipe normalizes x by frame width and y by height, so on a 4:3 frame
-    # a vertical offset is stretched 1.33x against a horizontal one. Rescaling
-    # x by the aspect ratio puts both axes in the same units, which is what
-    # makes the tilt angles in detector.py real degrees.
-    height, width = frame.shape[:2]
-    aspect_ratio = width / height if height else 1.0
-
-    def get(index: int) -> Landmark:
-        lm = landmark_list[index]
-        return Landmark(x=lm.x * aspect_ratio, y=lm.y, visibility=lm.visibility)
-
-    pts = PoseLandmarks(
-        nose=get(_IDX_NOSE),
-        left_ear=get(_IDX_LEFT_EAR),
-        right_ear=get(_IDX_RIGHT_EAR),
-        left_shoulder=get(_IDX_LEFT_SHOULDER),
-        right_shoulder=get(_IDX_RIGHT_SHOULDER),
-    )
-    if not pts.face_visible(min_visibility):
-        return None
-    return pts
+    return face_source.head_pose(frame)
 
 
 def _setup_state(**overrides) -> DashboardState:
@@ -283,7 +279,7 @@ def _run_countdown(
 
     Frames are pulled and discarded throughout so the camera's auto-exposure
     has settled before the samples that matter are taken (measured ramping
-    from ~134 to ~163 mean brightness over the first second). Pose inference
+    from ~134 to ~163 mean brightness over the first second). Face inference
     is deliberately skipped here -- nothing uses the result, and it is by far
     the most expensive part of a frame.
     """
@@ -300,19 +296,19 @@ def _run_countdown(
 def _calibrate(
     dashboard: Dashboard,
     cap: cv2.VideoCapture,
-    pose_source: PoseSource,
+    face_source: FaceSource,
     settings: Settings,
     stop_event: threading.Event,
 ) -> Baseline | None:
-    samples: list[PoseLandmarks] = []
+    samples: list[HeadPose] = []
     deadline = time.monotonic() + settings.calibration_seconds
     frame_interval = 1.0 / settings.analysis_fps
 
     while time.monotonic() < deadline and not stop_event.is_set():
         loop_start = time.monotonic()
-        landmarks = _read_landmarks(cap, pose_source, MIN_LANDMARK_VISIBILITY)
-        if landmarks is not None:
-            samples.append(landmarks)
+        pose = _read_head_pose(cap, face_source)
+        if pose is not None:
+            samples.append(pose)
 
         progress = min(
             100.0,
@@ -329,7 +325,7 @@ def _calibrate(
 
     if stop_event.is_set() or not samples:
         return None
-    return compute_baseline(samples, shoulder_min_visibility=SHOULDER_MIN_VISIBILITY)
+    return compute_baseline(samples)
 
 
 def run_capture_loop(
@@ -349,12 +345,12 @@ def run_capture_loop(
     calibrated = False
 
     try:
-        with PoseSource(POSE_MODEL_PATH) as pose_source, Dashboard() as dashboard:
+        with FaceSource(FACE_MODEL_PATH) as face_source, Dashboard() as dashboard:
             _run_countdown(dashboard, cap, settings, stop_event)
             if stop_event.is_set():
                 return
 
-            baseline = _calibrate(dashboard, cap, pose_source, settings, stop_event)
+            baseline = _calibrate(dashboard, cap, face_source, settings, stop_event)
             if stop_event.is_set():
                 return
             if baseline is None:
@@ -381,17 +377,13 @@ def run_capture_loop(
                 dt = loop_start - last_time
                 last_time = loop_start
 
-                landmarks = _read_landmarks(cap, pose_source, MIN_LANDMARK_VISIBILITY)
-                if landmarks is None:
+                head_pose = _read_head_pose(cap, face_source)
+                if head_pose is None:
                     smoother.reset()
                     result = timer.update(None)
                     deviation = None
                 else:
-                    deviation = smoother.update(
-                        compute_deviation(
-                            landmarks, baseline, shoulder_min_visibility=SHOULDER_MIN_VISIBILITY
-                        )
-                    )
+                    deviation = smoother.update(compute_deviation(head_pose, baseline))
                     result = timer.update(deviation.within(settings))
 
                 total_elapsed += dt
@@ -456,7 +448,7 @@ def main() -> None:
     # Download before claiming the camera, so a slow first-run download does
     # not hold the device open (and locked away from other apps) meanwhile.
     try:
-        ensure_pose_model(console)
+        ensure_face_model(console)
     except RuntimeError as exc:
         console.print(f"[bold red]{exc}[/bold red]")
         sys.exit(1)
@@ -466,6 +458,21 @@ def main() -> None:
     except CameraError as exc:
         console.print(f"[bold red]{exc}[/bold red]")
         sys.exit(1)
+
+    if settings.check_camera:
+        try:
+            with FaceSource(FACE_MODEL_PATH) as face_source:
+                framed = camera_check.run_preview(cap, face_source)
+        finally:
+            cap.release()
+        if framed:
+            console.print("[green]Camera looks good — run posture-tracker to start.[/green]")
+        else:
+            console.print(
+                "[yellow]Your head was never fully in frame.[/yellow] Tracking needs to see "
+                "your whole head, so aim the camera and run --check-camera again."
+            )
+        sys.exit(0 if framed else 1)
 
     shared = SharedState()
     stop_event = threading.Event()
