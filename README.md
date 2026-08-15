@@ -1,6 +1,6 @@
 # Posture Tracker
 
-A real-time posture-tracking CLI app for Linux Mint (XFCE), using a webcam.
+A real-time posture-tracking CLI app, using a webcam.
 Runs fully locally: MediaPipe Pose + OpenCV for detection, Rich for the
 terminal dashboard, and tkinter for a fullscreen warning overlay when bad
 posture persists too long.
