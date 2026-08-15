@@ -7,6 +7,7 @@ plain landmark dataclasses.
 from __future__ import annotations
 
 import math
+import statistics
 import time
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -16,6 +17,16 @@ from posture_tracker.config import Settings
 
 @dataclass(frozen=True)
 class Landmark:
+    """A single body keypoint in *square* units.
+
+    MediaPipe hands back coordinates normalized per axis (x by frame width,
+    y by frame height), so on a 4:3 frame a vertical offset is stretched 1.33x
+    relative to a horizontal one and an angle computed from them is not a real
+    angle. Callers are expected to rescale x by the frame aspect ratio before
+    building a Landmark, so everything in this module works in square units
+    and a degree is an actual degree.
+    """
+
     x: float
     y: float
     visibility: float = 1.0
@@ -66,14 +77,33 @@ class Deviation:
 
 
 def _tilt_angle_deg(left: Landmark, right: Landmark) -> float:
-    """Angle of the line left->right relative to horizontal, in degrees."""
-    return math.degrees(math.atan2(right.y - left.y, right.x - left.x))
+    """Tilt of the line through two landmarks, in degrees; 0 means level.
+
+    A line has no direction: left->right and right->left describe the same
+    tilt. That matters here because MediaPipe labels landmarks *anatomically*,
+    so on a non-mirrored webcam the subject's "left" landmark sits at a larger
+    x than the "right" one. A naive atan2(dy, dx) then lands near +/-180 deg,
+    right on the wraparound seam, where sub-pixel jitter flips the result
+    between +179 and -179 -- and averaging such samples (calibration) yields a
+    meaningless baseline near 0.
+
+    Forcing dx positive folds the result into (-90, 90], far away from any
+    seam, so both averaging and comparison behave.
+    """
+    dx = right.x - left.x
+    dy = right.y - left.y
+    if dx < 0:
+        dx, dy = -dx, -dy
+    return math.degrees(math.atan2(dy, dx))
 
 
-def _normalize_angle_deg(angle: float) -> float:
-    """Wraps an angle to (-180, 180] so deviations near the +/-180 seam
-    (e.g. baseline=179, current=-179) don't read as a ~360 degree jump."""
-    return (angle + 180.0) % 360.0 - 180.0
+def _normalize_tilt_diff_deg(diff: float) -> float:
+    """Folds a difference of two tilt angles into (-90, 90].
+
+    Tilts live modulo 180 (see _tilt_angle_deg), so a baseline of +89 and a
+    current reading of -89 differ by 2 degrees, not 178.
+    """
+    return (diff + 90.0) % 180.0 - 90.0
 
 
 def _shoulder_midpoint(landmarks: PoseLandmarks) -> tuple[float, float]:
@@ -88,26 +118,34 @@ def _nose_to_shoulder_line_distance(landmarks: PoseLandmarks) -> float:
 
 
 def compute_baseline(samples: list[PoseLandmarks]) -> Baseline:
-    """Average calibration samples into a reference baseline."""
+    """Reduce calibration samples to a reference posture.
+
+    Uses the median rather than the mean: a few bad frames (the user still
+    settling into the chair, a momentary mis-detection) would drag a mean far
+    enough to bias every later comparison, and a skewed baseline shows up as
+    permanent false "bad posture".
+    """
     if not samples:
         raise ValueError("cannot compute baseline from zero samples")
 
-    head_tilts = [_tilt_angle_deg(s.left_ear, s.right_ear) for s in samples]
-    shoulder_tilts = [_tilt_angle_deg(s.left_shoulder, s.right_shoulder) for s in samples]
-    distances = [_nose_to_shoulder_line_distance(s) for s in samples]
-
     return Baseline(
-        head_tilt_deg=sum(head_tilts) / len(head_tilts),
-        shoulder_tilt_deg=sum(shoulder_tilts) / len(shoulder_tilts),
-        nose_to_shoulder_line=sum(distances) / len(distances),
+        head_tilt_deg=statistics.median(
+            _tilt_angle_deg(s.left_ear, s.right_ear) for s in samples
+        ),
+        shoulder_tilt_deg=statistics.median(
+            _tilt_angle_deg(s.left_shoulder, s.right_shoulder) for s in samples
+        ),
+        nose_to_shoulder_line=statistics.median(
+            _nose_to_shoulder_line_distance(s) for s in samples
+        ),
     )
 
 
 def compute_deviation(landmarks: PoseLandmarks, baseline: Baseline) -> Deviation:
-    head_tilt = _normalize_angle_deg(
+    head_tilt = _normalize_tilt_diff_deg(
         _tilt_angle_deg(landmarks.left_ear, landmarks.right_ear) - baseline.head_tilt_deg
     )
-    shoulder_tilt = _normalize_angle_deg(
+    shoulder_tilt = _normalize_tilt_diff_deg(
         _tilt_angle_deg(landmarks.left_shoulder, landmarks.right_shoulder) - baseline.shoulder_tilt_deg
     )
     distance = _nose_to_shoulder_line_distance(landmarks)
@@ -117,6 +155,40 @@ def compute_deviation(landmarks: PoseLandmarks, baseline: Baseline) -> Deviation
         slouch_pct = 0.0
 
     return Deviation(head_tilt_deg=head_tilt, shoulder_tilt_deg=shoulder_tilt, slouch_pct=slouch_pct)
+
+
+class DeviationSmoother:
+    """Exponential moving average over successive deviations.
+
+    Per-frame landmark jitter is large enough to cross the thresholds on its
+    own, which flickers the status and restarts the violation timer at random.
+    Averaging over roughly the last second turns that into a stable reading
+    while still tracking a genuine posture change quickly.
+    """
+
+    def __init__(self, alpha: float):
+        if not 0.0 < alpha <= 1.0:
+            raise ValueError("alpha must be in (0, 1]")
+        self._alpha = alpha
+        self._current: Deviation | None = None
+
+    def reset(self) -> None:
+        """Drops accumulated history, e.g. after the subject left the frame."""
+        self._current = None
+
+    def update(self, deviation: Deviation) -> Deviation:
+        if self._current is None:
+            self._current = deviation
+            return deviation
+
+        a = self._alpha
+        prev = self._current
+        self._current = Deviation(
+            head_tilt_deg=a * deviation.head_tilt_deg + (1 - a) * prev.head_tilt_deg,
+            shoulder_tilt_deg=a * deviation.shoulder_tilt_deg + (1 - a) * prev.shoulder_tilt_deg,
+            slouch_pct=a * deviation.slouch_pct + (1 - a) * prev.slouch_pct,
+        )
+        return self._current
 
 
 class Status(Enum):
@@ -157,7 +229,6 @@ class HysteresisTimer:
         self._clock = clock
         self._violation_start: float | None = None
         self._notified = False
-        self._last_status = Status.OK
 
     def update(self, posture_ok: bool | None) -> HysteresisResult:
         """posture_ok: True=good, False=bad, None=face not visible."""
@@ -166,13 +237,11 @@ class HysteresisTimer:
         if posture_ok is None:
             self._violation_start = None
             self._notified = False
-            self._last_status = Status.PAUSED
             return HysteresisResult(status=Status.PAUSED, violation_seconds=0.0)
 
         if posture_ok:
             self._violation_start = None
             self._notified = False
-            self._last_status = Status.OK
             return HysteresisResult(status=Status.OK, violation_seconds=0.0)
 
         if self._violation_start is None:
@@ -180,7 +249,6 @@ class HysteresisTimer:
 
         elapsed = now - self._violation_start
         status = Status.ALERT if elapsed >= self._grace_period else Status.WARN
-        self._last_status = status
 
         should_notify = False
         if (

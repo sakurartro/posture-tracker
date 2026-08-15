@@ -30,6 +30,7 @@ class DashboardState:
     deviation: Deviation | None
     calibrating: bool = False
     calibration_progress: float = 0.0
+    countdown_seconds: float | None = None
 
 
 def _status_panel(state: DashboardState) -> Panel:
@@ -69,9 +70,17 @@ def _format_duration(seconds: float) -> str:
 
 
 def render_dashboard(state: DashboardState) -> Panel:
+    if state.countdown_seconds is not None:
+        body = Text(
+            f"Sit the way you want to be reminded to sit.\n"
+            f"Calibrating in {state.countdown_seconds:.0f}...",
+            style="bold cyan",
+        )
+        return Panel(body, title="Posture Tracker — get ready")
+
     if state.calibrating:
         body = Text(
-            f"Sit still... calibrating {state.calibration_progress:.0f}%",
+            f"Hold still... calibrating {state.calibration_progress:.0f}%",
             style="bold cyan",
         )
         return Panel(body, title="Posture Tracker — calibration")

@@ -31,16 +31,22 @@ python -m posture_tracker.main
 
 On first run, the app downloads a small (~6MB) MediaPipe pose model to
 `~/.local/share/posture-tracker/models/` — this needs internet once; every
-run after that is fully offline. Then sit still for 3 seconds for
-calibration. After that, the app tracks head tilt, shoulder tilt, and
-slouching relative to your calibrated reference posture.
+run after that is fully offline.
+
+Startup then runs a short countdown ("get into position") followed by a few
+seconds of calibration — **sit the way you want to be reminded to sit**, since
+everything afterwards is measured relative to that reference posture. If the
+baseline is captured while you are still reaching for the keyboard, the app
+will nag you for the rest of the session; restart it to recalibrate.
 
 ### Flags
 
 | Flag | Default | Description |
 |---|---|---|
 | `--camera` | `/dev/video0` | Camera device path or index |
+| `--calibration-countdown` | `3.0` | Countdown to get into position before calibration samples |
 | `--calibration-seconds` | `3.0` | Calibration duration, seconds |
+| `--smoothing` | `0.35` | Moving-average weight for the newest sample (lower = steadier, slower to react) |
 | `--notify-after` | `5.0` | Seconds of continuous bad posture before a desktop notification fires |
 | `--grace-period` | `10.0` | Seconds of continuous bad posture before the fullscreen overlay fires |
 | `--fps` | `12` | Analysis loop frame rate |
