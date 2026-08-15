@@ -145,3 +145,46 @@ def test_hysteresis_paused_when_face_lost_resets_timer():
     result = timer.update(posture_ok=False)
     assert result.status == Status.WARN
     assert result.violation_seconds == 0.0
+
+
+def test_hysteresis_notifies_once_after_notify_threshold():
+    clock = FakeClock()
+    timer = HysteresisTimer(grace_period_seconds=10.0, notify_after_seconds=5.0, clock=clock)
+    timer.update(posture_ok=False)
+
+    clock.advance(3.0)
+    result = timer.update(posture_ok=False)
+    assert result.should_notify is False
+
+    clock.advance(2.5)  # total 5.5s, past the 5s notify threshold
+    result = timer.update(posture_ok=False)
+    assert result.status == Status.WARN  # still under the 10s overlay threshold
+    assert result.should_notify is True
+
+    clock.advance(1.0)
+    result = timer.update(posture_ok=False)
+    assert result.should_notify is False  # only fires once per continuous violation
+
+
+def test_hysteresis_notify_flag_resets_after_posture_recovers():
+    clock = FakeClock()
+    timer = HysteresisTimer(grace_period_seconds=10.0, notify_after_seconds=5.0, clock=clock)
+    timer.update(posture_ok=False)
+    clock.advance(6.0)
+    assert timer.update(posture_ok=False).should_notify is True
+
+    timer.update(posture_ok=True)
+
+    timer.update(posture_ok=False)
+    clock.advance(6.0)
+    assert timer.update(posture_ok=False).should_notify is True
+
+
+def test_hysteresis_without_notify_threshold_never_notifies():
+    clock = FakeClock()
+    timer = HysteresisTimer(grace_period_seconds=10.0, clock=clock)
+    timer.update(posture_ok=False)
+    clock.advance(20.0)
+    result = timer.update(posture_ok=False)
+    assert result.status == Status.ALERT
+    assert result.should_notify is False

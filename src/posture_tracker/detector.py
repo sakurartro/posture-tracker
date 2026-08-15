@@ -130,6 +130,7 @@ class Status(Enum):
 class HysteresisResult:
     status: Status
     violation_seconds: float
+    should_notify: bool = False
 
 
 class HysteresisTimer:
@@ -137,14 +138,25 @@ class HysteresisTimer:
 
     - Good posture -> timer resets to 0, status OK.
     - Bad posture -> timer accumulates; status WARN until grace period elapses,
-      then ALERT.
+      then ALERT (this is the threshold that triggers the fullscreen overlay).
     - Face lost -> timer resets to 0, status PAUSED, regardless of prior state.
+    - `should_notify` fires exactly once per continuous violation, the first
+      update where the violation has lasted at least `notify_after_seconds`
+      (a separate, earlier threshold meant for a background desktop
+      notification rather than the fullscreen overlay).
     """
 
-    def __init__(self, grace_period_seconds: float, clock=time.monotonic):
+    def __init__(
+        self,
+        grace_period_seconds: float,
+        notify_after_seconds: float | None = None,
+        clock=time.monotonic,
+    ):
         self._grace_period = grace_period_seconds
+        self._notify_after = notify_after_seconds
         self._clock = clock
         self._violation_start: float | None = None
+        self._notified = False
         self._last_status = Status.OK
 
     def update(self, posture_ok: bool | None) -> HysteresisResult:
@@ -153,11 +165,13 @@ class HysteresisTimer:
 
         if posture_ok is None:
             self._violation_start = None
+            self._notified = False
             self._last_status = Status.PAUSED
             return HysteresisResult(status=Status.PAUSED, violation_seconds=0.0)
 
         if posture_ok:
             self._violation_start = None
+            self._notified = False
             self._last_status = Status.OK
             return HysteresisResult(status=Status.OK, violation_seconds=0.0)
 
@@ -167,4 +181,14 @@ class HysteresisTimer:
         elapsed = now - self._violation_start
         status = Status.ALERT if elapsed >= self._grace_period else Status.WARN
         self._last_status = status
-        return HysteresisResult(status=status, violation_seconds=elapsed)
+
+        should_notify = False
+        if (
+            self._notify_after is not None
+            and not self._notified
+            and elapsed >= self._notify_after
+        ):
+            should_notify = True
+            self._notified = True
+
+        return HysteresisResult(status=status, violation_seconds=elapsed, should_notify=should_notify)
