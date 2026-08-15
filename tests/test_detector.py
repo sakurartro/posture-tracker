@@ -58,6 +58,16 @@ def test_compute_deviation_detects_slouch():
     assert deviation.slouch_pct > 0
 
 
+def test_compute_deviation_normalizes_angle_wraparound():
+    # Baseline sits just below the +180 seam; the current angle sits just
+    # below the -180 seam (nearly the same physical tilt). A naive
+    # subtraction gives a ~358 degree jump; normalized it should be small.
+    baseline = Baseline(head_tilt_deg=179.0, shoulder_tilt_deg=0.0, nose_to_shoulder_line=0.2)
+    pose = make_pose(left_ear=(0.55, 0.281), right_ear=(0.45, 0.28))
+    deviation = compute_deviation(pose, baseline)
+    assert abs(deviation.head_tilt_deg) < 20.0
+
+
 def test_baseline_requires_samples():
     import pytest
 

@@ -70,6 +70,12 @@ def _tilt_angle_deg(left: Landmark, right: Landmark) -> float:
     return math.degrees(math.atan2(right.y - left.y, right.x - left.x))
 
 
+def _normalize_angle_deg(angle: float) -> float:
+    """Wraps an angle to (-180, 180] so deviations near the +/-180 seam
+    (e.g. baseline=179, current=-179) don't read as a ~360 degree jump."""
+    return (angle + 180.0) % 360.0 - 180.0
+
+
 def _shoulder_midpoint(landmarks: PoseLandmarks) -> tuple[float, float]:
     mx = (landmarks.left_shoulder.x + landmarks.right_shoulder.x) / 2
     my = (landmarks.left_shoulder.y + landmarks.right_shoulder.y) / 2
@@ -98,10 +104,11 @@ def compute_baseline(samples: list[PoseLandmarks]) -> Baseline:
 
 
 def compute_deviation(landmarks: PoseLandmarks, baseline: Baseline) -> Deviation:
-    head_tilt = _tilt_angle_deg(landmarks.left_ear, landmarks.right_ear) - baseline.head_tilt_deg
-    shoulder_tilt = (
-        _tilt_angle_deg(landmarks.left_shoulder, landmarks.right_shoulder)
-        - baseline.shoulder_tilt_deg
+    head_tilt = _normalize_angle_deg(
+        _tilt_angle_deg(landmarks.left_ear, landmarks.right_ear) - baseline.head_tilt_deg
+    )
+    shoulder_tilt = _normalize_angle_deg(
+        _tilt_angle_deg(landmarks.left_shoulder, landmarks.right_shoulder) - baseline.shoulder_tilt_deg
     )
     distance = _nose_to_shoulder_line_distance(landmarks)
     if baseline.nose_to_shoulder_line > 0:
