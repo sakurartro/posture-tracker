@@ -59,7 +59,7 @@ class PoseLandmarks:
 class Baseline:
     head_tilt_deg: float
     shoulder_tilt_deg: float
-    nose_to_shoulder_line: float
+    head_height_ratio: float
 
 
 @dataclass(frozen=True)
@@ -112,9 +112,24 @@ def _shoulder_midpoint(landmarks: PoseLandmarks) -> tuple[float, float]:
     return mx, my
 
 
-def _nose_to_shoulder_line_distance(landmarks: PoseLandmarks) -> float:
-    mx, my = _shoulder_midpoint(landmarks)
-    return math.hypot(landmarks.nose.x - mx, landmarks.nose.y - my)
+def _head_height_ratio(landmarks: PoseLandmarks) -> float:
+    """How high the head rides above the shoulder line, relative to shoulder width.
+
+    Slouching drops the head toward the shoulders, so this shrinks. Dividing
+    by shoulder width is what makes it a *posture* measure rather than a
+    *distance-to-camera* measure: rolling the chair back shrinks every
+    on-screen length at once, leaving the ratio unchanged, whereas the raw
+    nose-to-shoulder distance this replaced moved by more than the violation
+    threshold on chair movement alone.
+    """
+    width = math.hypot(
+        landmarks.right_shoulder.x - landmarks.left_shoulder.x,
+        landmarks.right_shoulder.y - landmarks.left_shoulder.y,
+    )
+    if width <= 0:
+        return 0.0
+    _, shoulder_y = _shoulder_midpoint(landmarks)
+    return (shoulder_y - landmarks.nose.y) / width
 
 
 def compute_baseline(samples: list[PoseLandmarks]) -> Baseline:
@@ -135,8 +150,8 @@ def compute_baseline(samples: list[PoseLandmarks]) -> Baseline:
         shoulder_tilt_deg=statistics.median(
             _tilt_angle_deg(s.left_shoulder, s.right_shoulder) for s in samples
         ),
-        nose_to_shoulder_line=statistics.median(
-            _nose_to_shoulder_line_distance(s) for s in samples
+        head_height_ratio=statistics.median(
+            _head_height_ratio(s) for s in samples
         ),
     )
 
@@ -148,9 +163,9 @@ def compute_deviation(landmarks: PoseLandmarks, baseline: Baseline) -> Deviation
     shoulder_tilt = _normalize_tilt_diff_deg(
         _tilt_angle_deg(landmarks.left_shoulder, landmarks.right_shoulder) - baseline.shoulder_tilt_deg
     )
-    distance = _nose_to_shoulder_line_distance(landmarks)
-    if baseline.nose_to_shoulder_line > 0:
-        slouch_pct = (distance - baseline.nose_to_shoulder_line) / baseline.nose_to_shoulder_line * 100
+    ratio = _head_height_ratio(landmarks)
+    if baseline.head_height_ratio > 0:
+        slouch_pct = (ratio - baseline.head_height_ratio) / baseline.head_height_ratio * 100
     else:
         slouch_pct = 0.0
 

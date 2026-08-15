@@ -33,7 +33,7 @@ def test_compute_baseline_averages_samples():
     baseline = compute_baseline(samples)
     assert baseline.head_tilt_deg == 0.0
     assert baseline.shoulder_tilt_deg == 0.0
-    assert baseline.nose_to_shoulder_line > 0
+    assert baseline.head_height_ratio > 0
 
 
 def test_compute_deviation_zero_when_matching_baseline():
@@ -52,9 +52,50 @@ def test_compute_deviation_detects_head_tilt():
     assert deviation.head_tilt_deg != 0.0
 
 
+def scaled(pose: PoseLandmarks, factor: float, shift: float = 0.0) -> PoseLandmarks:
+    """The same posture seen from further away (everything shrinks towards a
+    point) and shifted in frame."""
+
+    def s(lm: Landmark) -> Landmark:
+        return Landmark(
+            x=lm.x * factor + shift,
+            y=lm.y * factor + shift,
+            visibility=lm.visibility,
+        )
+
+    return PoseLandmarks(
+        nose=s(pose.nose),
+        left_ear=s(pose.left_ear),
+        right_ear=s(pose.right_ear),
+        left_shoulder=s(pose.left_shoulder),
+        right_shoulder=s(pose.right_shoulder),
+    )
+
+
+def test_slouch_metric_ignores_distance_from_camera():
+    # Rolling the chair back shrinks every on-screen length at once. That is
+    # not a posture change and must not register as one -- the previous raw
+    # nose-to-shoulder distance moved ~20% on chair movement alone, well past
+    # the 12% violation threshold.
+    upright = make_camera_pose()
+    baseline = compute_baseline([upright])
+
+    for factor in (0.6, 0.8, 1.25):
+        deviation = compute_deviation(scaled(upright, factor, shift=0.05), baseline)
+        assert abs(deviation.slouch_pct) < 1.0, f"drifted at scale {factor}"
+
+
+def test_slouch_metric_detects_head_dropping_towards_shoulders():
+    baseline = compute_baseline([make_camera_pose()])
+    # Same framing, but the head sinks towards the shoulder line.
+    slouched = make_camera_pose(nose_y=0.42)
+    deviation = compute_deviation(slouched, baseline)
+    assert deviation.slouch_pct < -20.0
+
+
 def test_compute_deviation_detects_slouch():
     baseline = compute_baseline([make_pose()])
-    # Nose moves further from the shoulder line -> distance increases.
+    # Nose rides higher above the shoulder line -> ratio increases.
     leaning = make_pose(nose=(0.5, 0.1))
     deviation = compute_deviation(leaning, baseline)
     assert deviation.slouch_pct > 0
