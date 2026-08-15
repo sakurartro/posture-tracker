@@ -80,52 +80,9 @@ the autostart entry runs.
 | `~/.local/share/posture-tracker/tracker.log` | Background tracker output |
 | `~/.config/autostart/posture-tracker.desktop` | Autostart entry |
 
-## Tuning
-
-There are no tuning flags on purpose — the surface is deliberately three
-commands. Every threshold lives in `src/posture_tracker/config.py` with a note
-on the measurement behind it, if you want to adjust one.
-
 ## Tests
 
 ```bash
 pip install -e ".[dev]"
 pytest
 ```
-
-## Design notes
-
-Three things caused nearly every problem worth knowing about:
-
-**The face model, not MediaPipe Pose.** Pose is a whole-body model, and on a
-laptop webcam there is no body in view — it reported shoulders it could not see
-by extrapolating them, below the bottom edge of frame in every one of 130
-measured samples. On a motionless subject its head roll carried 12° of noise
-against the ~8° being measured. Face Landmarker gives the head's 3D orientation
-directly, measures ~0.2° of roll noise in the same conditions, costs about a
-seventh as much per frame, and reports nothing when it cannot really see a
-face — which makes "is the user there" an honest question rather than a guess.
-
-**Capture resolution decides the field of view.** The app asks for 1280x720
-rather than accepting the driver's default. A MacBook's FaceTime HD sensor
-offers only that mode, so a 640x480 default was produced by cropping the sides
-off the 16:9 sensor — discarding about a quarter of the horizontal view.
-Measured back to back without the subject moving: at 640x480 the face was not
-detected at all; at 1280x720 it sat dead centre. Frames are downscaled again
-before inference, so the wider capture costs nothing.
-
-**Fresh frames.** The camera produces at 30fps while analysis runs at 5fps, so
-frames pile up in the V4L2 queue and a plain `read()` returns the *oldest* one
-— measured ~3 frames of lag, which reads as the app being slow to notice you
-straightened up. Neither `CAP_PROP_BUFFERSIZE` nor `CAP_PROP_FPS` is honoured
-by this backend, so the queue is drained explicitly and only the newest frame
-kept.
-
-## Known limitations
-
-- Posture is judged from the head alone. A hunched back held with a level head
-  will not be caught.
-- The overlay is written for a single monitor; behaviour on multi-monitor
-  setups has not been tested.
-- Autostart uses the XDG spec, so it works on XFCE, GNOME and KDE, but not on
-  desktops that ignore `~/.config/autostart`.
