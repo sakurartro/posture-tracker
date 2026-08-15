@@ -19,6 +19,8 @@ calls happen after that.
 
 from __future__ import annotations
 
+import signal
+import subprocess
 import sys
 import threading
 import time
@@ -53,6 +55,30 @@ from posture_tracker.ui import Dashboard, DashboardState
 
 class CameraError(RuntimeError):
     pass
+
+
+_notify_available = True
+
+
+def send_notification(title: str, message: str) -> None:
+    """Fires a desktop notification via notify-send (libnotify). Works the
+    same whether the app is in a foreground terminal or backgrounded with
+    nohup/disown, since it talks to the desktop's notification daemon over
+    D-Bus rather than the terminal. Silently no-ops if notify-send isn't
+    installed, so a missing dependency never crashes tracking."""
+    global _notify_available
+    if not _notify_available:
+        return
+    try:
+        subprocess.run(
+            ["notify-send", "-a", "Posture Tracker", "-u", "normal", title, message],
+            check=False,
+            timeout=5,
+        )
+    except FileNotFoundError:
+        _notify_available = False
+    except subprocess.TimeoutExpired:
+        pass
 
 
 class SharedState:
@@ -235,7 +261,10 @@ def run_capture_loop(
                 stop_event.set()
                 return
 
-            timer = HysteresisTimer(settings.grace_period_seconds)
+            timer = HysteresisTimer(
+                grace_period_seconds=settings.grace_period_seconds,
+                notify_after_seconds=settings.notify_after_seconds,
+            )
             session_start = datetime.now(timezone.utc)
             total_elapsed = 0.0
             good_elapsed = 0.0
@@ -265,6 +294,12 @@ def run_capture_loop(
                     if result.status == Status.ALERT and prev_status != Status.ALERT:
                         violation_count += 1
                     prev_status = result.status
+
+                    if result.should_notify:
+                        send_notification(
+                            "Posture Tracker",
+                            f"You've been slouching for {result.violation_seconds:.0f}s — straighten up.",
+                        )
 
                     good_pct = (good_elapsed / total_elapsed * 100.0) if total_elapsed > 0 else 100.0
                     shared.set_show_overlay(result.status == Status.ALERT)
@@ -318,6 +353,17 @@ def main() -> None:
 
     shared = SharedState()
     stop_event = threading.Event()
+
+    # SIGINT (Ctrl+C) is turned into KeyboardInterrupt by Python's default
+    # handler, but SIGTERM has no such default — and SIGTERM (not SIGINT) is
+    # how backgrounded/daemonized processes are normally stopped (`kill`,
+    # `systemctl stop`, session logout). Route it through the same stop_event
+    # the rest of shutdown already uses so the camera and overlay are always
+    # cleaned up, not just on Ctrl+C.
+    def _handle_sigterm(signum, frame) -> None:
+        stop_event.set()
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
 
     thread = threading.Thread(
         target=run_capture_loop,
