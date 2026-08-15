@@ -15,7 +15,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-DATA_DIR = Path.home() / ".local" / "share" / "posture-tracker"
+from posture_tracker import paths
+
+DATA_DIR = paths.data_dir()
 DEFAULT_DB_PATH = DATA_DIR / "posture.db"
 BASELINE_PATH = DATA_DIR / "baseline.json"
 

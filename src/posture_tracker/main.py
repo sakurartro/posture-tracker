@@ -31,7 +31,7 @@ import mediapipe as mp
 from mediapipe.tasks.python import BaseOptions, vision
 from rich.console import Console
 
-from posture_tracker import camera_check, overlay, service, storage, ui
+from posture_tracker import camera_check, overlay, paths, service, storage, ui
 from posture_tracker.config import (
     CAPTURE_HEIGHT,
     CAPTURE_WIDTH,
@@ -62,27 +62,59 @@ class CameraError(RuntimeError):
 _notify_available = True
 
 
+_WINDOWS_TOAST_SCRIPT = """
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime] > $null
+$xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent(
+    [Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+$texts = $xml.GetElementsByTagName("text")
+$texts.Item(0).AppendChild($xml.CreateTextNode("%TITLE%")) > $null
+$texts.Item(1).AppendChild($xml.CreateTextNode("%BODY%")) > $null
+$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Posture Tracker").Show($toast)
+"""
+
+
+def _notification_command(title: str, message: str) -> list[str]:
+    """The platform's way of raising a desktop notification."""
+    if paths.is_macos():
+        script = (f'display notification {_applescript_string(message)} '
+                  f'with title {_applescript_string(title)}')
+        return ["osascript", "-e", script]
+    if paths.is_windows():
+        script = (_WINDOWS_TOAST_SCRIPT
+                  .replace("%TITLE%", title.replace('"', "'"))
+                  .replace("%BODY%", message.replace('"', "'")))
+        return ["powershell", "-NoProfile", "-NonInteractive", "-Command", script]
+    return ["notify-send", "-a", "Posture Tracker", "-u", "normal", title, message]
+
+
+def _applescript_string(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def send_notification(title: str, message: str) -> None:
-    """Fires a desktop notification via notify-send (libnotify). Works the
-    same whether the app is in a foreground terminal or backgrounded with
-    nohup/disown, since it talks to the desktop's notification daemon over
-    D-Bus rather than the terminal. Silently no-ops if notify-send isn't
-    installed, so a missing dependency never crashes tracking.
+    """Raises a desktop notification, whatever the platform provides.
+
+    Works the same whether the app is in a foreground terminal or running in
+    the background, because it talks to the desktop's notification service
+    rather than the terminal. Silently gives up if the platform's notifier is
+    missing, so an absent dependency never crashes posture tracking.
 
     Fire-and-forget on purpose: this runs on the capture thread, and waiting
-    on the notification daemon would stall posture tracking for as long as it
-    takes to answer.
+    on the notification service would stall tracking for as long as it takes
+    to answer.
     """
     global _notify_available
     if not _notify_available:
         return
     try:
         subprocess.Popen(
-            ["notify-send", "-a", "Posture Tracker", "-u", "normal", title, message],
+            _notification_command(title, message),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-    except FileNotFoundError:
+    except (FileNotFoundError, OSError):
         _notify_available = False
 
 
@@ -110,17 +142,28 @@ def _parse_camera_device(device: str) -> int | str:
     return device
 
 
-def open_camera(device: str) -> cv2.VideoCapture:
-    """Opens the webcam through the native V4L2 backend.
+def _capture_backend() -> int:
+    """The platform's native capture API, named explicitly.
 
-    Left to itself OpenCV probes backends and settles on FFmpeg's
-    video4linux2 demuxer, which costs ~1.1s of startup and prints
-    "ioctl(VIDIOC_QBUF): Bad file descriptor" to stderr on the way (harmless,
-    but it lands in the middle of the dashboard). Naming the backend skips the
-    probe entirely: measured 2ms to open, and no stray output.
+    Left to itself OpenCV probes backends. On Linux it settled on FFmpeg's
+    video4linux2 demuxer, which cost ~1.1s of startup and printed
+    "ioctl(VIDIOC_QBUF): Bad file descriptor" into the middle of the
+    dashboard; naming V4L2 dropped that to 2ms with no stray output. The same
+    reasoning picks AVFoundation on macOS and DirectShow on Windows, both of
+    which also honour an explicit capture resolution more reliably than the
+    probe result does.
     """
+    if paths.is_macos():
+        return cv2.CAP_AVFOUNDATION
+    if paths.is_windows():
+        return cv2.CAP_DSHOW
+    return cv2.CAP_V4L2
+
+
+def open_camera(device: str) -> cv2.VideoCapture:
+    """Opens the webcam through the platform's native capture backend."""
     identifier = _parse_camera_device(device)
-    cap = cv2.VideoCapture(identifier, cv2.CAP_V4L2)
+    cap = cv2.VideoCapture(identifier, _capture_backend())
     if not cap.isOpened():
         cap.release()
         raise CameraError(

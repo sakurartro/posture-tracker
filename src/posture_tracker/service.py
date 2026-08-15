@@ -1,8 +1,15 @@
 """Running in the background, and surviving a reboot.
 
-Autostart uses the XDG spec (~/.config/autostart/*.desktop), which XFCE, GNOME
-and KDE all honour, so there is no need for a systemd unit or anything
-desktop-specific.
+Each desktop has its own idea of "start this at login":
+
+- Linux: an XDG .desktop file in ~/.config/autostart, honoured by XFCE,
+  GNOME and KDE alike, so no systemd unit is needed.
+- macOS: a LaunchAgent plist in ~/Library/LaunchAgents.
+- Windows: a launcher in the Start Menu's Startup folder.
+
+Linux is the platform this was built and measured on; the macOS and Windows
+paths follow the documented conventions but have not been run on real
+machines.
 
 The running tracker is tracked by a pid file rather than by scanning process
 names, so stopping it cannot accidentally kill an unrelated process that
@@ -12,18 +19,20 @@ happens to share a name.
 from __future__ import annotations
 
 import os
+import plistlib
 import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+from posture_tracker import paths
 from posture_tracker.storage import DATA_DIR
 
-AUTOSTART_DIR = Path.home() / ".config" / "autostart"
-AUTOSTART_FILE = AUTOSTART_DIR / "posture-tracker.desktop"
 PID_FILE = DATA_DIR / "tracker.pid"
 LOG_FILE = DATA_DIR / "tracker.log"
+
+LAUNCH_AGENT_LABEL = "io.posturetracker.tracker"
 
 _DESKTOP_ENTRY = """[Desktop Entry]
 Type=Application
@@ -33,6 +42,15 @@ Exec={exec_line}
 Terminal=false
 X-GNOME-Autostart-enabled=true
 """
+
+
+def autostart_file() -> Path:
+    if paths.is_macos():
+        return Path.home() / "Library" / "LaunchAgents" / f"{LAUNCH_AGENT_LABEL}.plist"
+    if paths.is_windows():
+        return (Path.home() / "AppData" / "Roaming" / "Microsoft" / "Windows"
+                / "Start Menu" / "Programs" / "Startup" / "posture-tracker.bat")
+    return Path.home() / ".config" / "autostart" / "posture-tracker.desktop"
 
 
 def executable_argv() -> list[str]:
@@ -46,7 +64,8 @@ def executable_argv() -> list[str]:
     spaces (a Russian-locale desktop puts projects under "Рабочий стол", for
     one), and splitting such a command back apart tears the path in half.
     """
-    console_script = Path(sys.executable).with_name("posture-tracker")
+    suffix = ".exe" if paths.is_windows() else ""
+    console_script = Path(sys.executable).with_name(f"posture-tracker{suffix}")
     if console_script.exists():
         return [str(console_script), "--foreground"]
     return [sys.executable, "-m", "posture_tracker.main", "--foreground"]
@@ -73,24 +92,49 @@ def desktop_exec_line() -> str:
     return " ".join(_quote_desktop_arg(a) for a in executable_argv())
 
 
+def _autostart_contents() -> bytes:
+    argv = executable_argv()
+    if paths.is_macos():
+        return plistlib.dumps({
+            "Label": LAUNCH_AGENT_LABEL,
+            "ProgramArguments": argv,
+            "RunAtLoad": True,
+        })
+    if paths.is_windows():
+        # `start ""` returns immediately and the empty title argument keeps a
+        # quoted path from being mistaken for the window title.
+        quoted = " ".join(f'"{a}"' if " " in a else a for a in argv)
+        return f'@echo off\r\nstart "" {quoted}\r\n'.encode()
+    return _DESKTOP_ENTRY.format(exec_line=desktop_exec_line()).encode()
+
+
 def install_autostart() -> Path:
-    AUTOSTART_DIR.mkdir(parents=True, exist_ok=True)
-    AUTOSTART_FILE.write_text(_DESKTOP_ENTRY.format(exec_line=desktop_exec_line()))
-    return AUTOSTART_FILE
+    target = autostart_file()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(_autostart_contents())
+    return target
 
 
 def remove_autostart() -> bool:
     """True if an entry was actually there."""
-    existed = AUTOSTART_FILE.exists()
-    AUTOSTART_FILE.unlink(missing_ok=True)
+    target = autostart_file()
+    existed = target.exists()
+    target.unlink(missing_ok=True)
     return existed
 
 
 def autostart_installed() -> bool:
-    return AUTOSTART_FILE.exists()
+    return autostart_file().exists()
 
 
 def _process_alive(pid: int) -> bool:
+    if paths.is_windows():
+        # Windows has no signal-0 probe; ask the task list instead.
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+            capture_output=True, text=True,
+        )
+        return str(pid) in result.stdout
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -122,21 +166,38 @@ def clear_pid_file() -> None:
 
 
 def start_background() -> int:
-    """Launches the tracker detached from this terminal and returns its pid.
-
-    start_new_session puts it in its own session, so closing the terminal (or
-    the shell sending SIGHUP on exit) does not take the tracker with it.
-    """
+    """Launches the tracker detached from this terminal and returns its pid."""
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(LOG_FILE, "ab") as log:
-        process = subprocess.Popen(
-            executable_argv(),
-            stdout=log,
-            stderr=log,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        if paths.is_windows():
+            # No console window, and detached so closing this one leaves the
+            # tracker alone.
+            flags = (getattr(subprocess, "DETACHED_PROCESS", 0)
+                     | getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            process = subprocess.Popen(
+                executable_argv(),
+                stdout=log, stderr=log, stdin=subprocess.DEVNULL,
+                creationflags=flags,
+            )
+        else:
+            # Its own session, so a shell sending SIGHUP on exit does not take
+            # the tracker with it.
+            process = subprocess.Popen(
+                executable_argv(),
+                stdout=log, stderr=log, stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
     return process.pid
+
+
+def _terminate(pid: int) -> None:
+    if paths.is_windows():
+        # taskkill asks the process to close rather than shooting it, which
+        # gives it the chance to release the camera and save the session.
+        subprocess.run(["taskkill", "/PID", str(pid), "/T"],
+                       capture_output=True)
+        return
+    os.kill(pid, signal.SIGTERM)
 
 
 def stop_background(wait_timeout: float = 10.0) -> bool:
@@ -153,7 +214,7 @@ def stop_background(wait_timeout: float = 10.0) -> bool:
         return False
 
     try:
-        os.kill(pid, signal.SIGTERM)
+        _terminate(pid)
     except ProcessLookupError:
         clear_pid_file()
         return True

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from pathlib import Path
+
+from posture_tracker import paths
 
 # Seconds of "get into position" countdown before calibration starts sampling.
 # Without it the baseline is captured while you are still reaching for the
@@ -30,7 +31,12 @@ HEAD_PITCH_THRESHOLD_DEG = 6.0
 # status stable without noticeably delaying a real posture change.
 SMOOTHING_ALPHA = 0.35
 
-DEFAULT_CAMERA_DEVICE = "/dev/video0"
+def _default_camera_device() -> str:
+    """Linux names cameras by device file; macOS and Windows use an index."""
+    return "/dev/video0" if paths.is_linux() else "0"
+
+
+DEFAULT_CAMERA_DEVICE = _default_camera_device()
 
 # Ask for a widescreen capture rather than accepting the driver's default.
 # A MacBook's FaceTime HD sensor offers 1280x720 and nothing else, so when
@@ -60,7 +66,7 @@ FACE_MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
     "face_landmarker/float16/latest/face_landmarker.task"
 )
-FACE_MODEL_PATH = Path.home() / ".local" / "share" / "posture-tracker" / "models" / "face_landmarker.task"
+FACE_MODEL_PATH = paths.data_dir() / "models" / "face_landmarker.task"
 
 
 @dataclass(frozen=True)

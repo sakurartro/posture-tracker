@@ -8,11 +8,58 @@ the background, and taps you on the shoulder when you have been slouching.
 
 ## Install
 
+**Linux**
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 pip install -e .
+```
+
+**macOS** — *beta, may not work*
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install -e .
+```
+
+macOS will ask for camera permission the first time; allow it for your
+terminal, or the tracker sees nothing. Autostart is installed as a LaunchAgent
+and takes effect at your next login.
+
+**Windows** — *beta, may not work*
+
+```powershell
+py -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+pip install -e .
+```
+
+Autostart is installed as a launcher in the Start Menu's Startup folder.
+
+### Platform support
+
+Linux is where this was built and measured; everything below was verified
+there. The macOS and Windows paths follow each platform's documented
+conventions, but have not been run on real machines — treat them as beta and
+expect the rough edges to be in setup rather than in the tracking itself.
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| Detection, overlay, dashboard, stats | verified | should work | should work |
+| Desktop notifications | verified | `osascript`, untested | PowerShell toast, untested |
+| Autostart | verified | LaunchAgent, untested | Startup folder, untested |
+| Background start/stop | verified | should work | `taskkill`, untested |
+
+If autostart or the background mode misbehaves on macOS or Windows, everything
+still works run directly:
+
+```bash
+posture-tracker --foreground
 ```
 
 ## Use
@@ -45,9 +92,15 @@ And one for when things move:
 posture-tracker --calibrate   # after moving the laptop, or changing chair
 ```
 
-On first run it downloads a small (~4MB) face model to
-`~/.local/share/posture-tracker/models/`. That needs the internet once; every
-run after that is fully offline.
+On first run it downloads a small (~4MB) face model. That needs the internet
+once; every run after that is fully offline. It, the database and your
+calibration live in the platform's usual place:
+
+| | Path |
+|---|---|
+| Linux | `~/.local/share/posture-tracker/` |
+| macOS | `~/Library/Application Support/posture-tracker/` |
+| Windows | `%LOCALAPPDATA%\posture-tracker\` |
 
 ## What it does when you slouch
 
@@ -70,15 +123,6 @@ posture-tracker --foreground
 Runs the tracker in your terminal with a live dashboard (status, session
 stats, current head angles) instead of in the background. This is also what
 the autostart entry runs.
-
-## Where things live
-
-| Path | What |
-|---|---|
-| `~/.local/share/posture-tracker/posture.db` | Session history, for `--stats` |
-| `~/.local/share/posture-tracker/baseline.json` | Your calibrated posture |
-| `~/.local/share/posture-tracker/tracker.log` | Background tracker output |
-| `~/.config/autostart/posture-tracker.desktop` | Autostart entry |
 
 ## Tests
 
