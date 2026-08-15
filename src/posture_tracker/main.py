@@ -111,8 +111,16 @@ def _parse_camera_device(device: str) -> int | str:
 
 
 def open_camera(device: str) -> cv2.VideoCapture:
+    """Opens the webcam through the native V4L2 backend.
+
+    Left to itself OpenCV probes backends and settles on FFmpeg's
+    video4linux2 demuxer, which costs ~1.1s of startup and prints
+    "ioctl(VIDIOC_QBUF): Bad file descriptor" to stderr on the way (harmless,
+    but it lands in the middle of the dashboard). Naming the backend skips the
+    probe entirely: measured 2ms to open, and no stray output.
+    """
     identifier = _parse_camera_device(device)
-    cap = cv2.VideoCapture(identifier)
+    cap = cv2.VideoCapture(identifier, cv2.CAP_V4L2)
     if not cap.isOpened():
         cap.release()
         raise CameraError(
