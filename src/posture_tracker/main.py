@@ -32,6 +32,7 @@ from mediapipe.tasks.python import BaseOptions, vision
 from rich.console import Console
 
 from posture_tracker import camera_check, overlay, paths, service, storage, ui
+from posture_tracker.quiet import native_stderr_silenced
 from posture_tracker.config import (
     CAPTURE_HEIGHT,
     CAPTURE_WIDTH,
@@ -211,7 +212,8 @@ class FaceSource:
             num_faces=1,
             output_facial_transformation_matrixes=True,
         )
-        self._landmarker = vision.FaceLandmarker.create_from_options(options)
+        with native_stderr_silenced():
+            self._landmarker = vision.FaceLandmarker.create_from_options(options)
         self._start = time.monotonic()
 
     def _detect(self, frame_bgr):

@@ -44,7 +44,7 @@ Autostart is installed as a launcher in the Start Menu's Startup folder.
 ### Platform support
 
 Linux is where this was built and measured; everything below was verified
-there. The macOS and Windows paths follow each platform's documented
+on Linux Mint XFCE. The macOS and Windows paths follow each platform's documented
 conventions, but have not been run on real machines — treat them as beta and
 expect the rough edges to be in setup rather than in the tracking itself.
 

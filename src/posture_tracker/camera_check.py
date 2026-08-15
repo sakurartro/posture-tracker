@@ -17,6 +17,8 @@ import time
 
 import cv2
 
+from posture_tracker.quiet import native_stderr_silenced
+
 GREEN = (0, 200, 0)
 RED = (0, 0, 255)
 WHITE = (255, 255, 255)
@@ -35,6 +37,18 @@ def run_preview(cap, face_source, timeout_seconds: float = 300.0) -> bool:
 
     Returns True if the head was seen fully in frame and steady.
     """
+    # Qt's highgui backend prints a "Cannot find font directory" warning on
+    # window creation and again on the first several redraws; there is no
+    # font directory to actually deploy here, the window just doesn't need
+    # Qt's fonts for anything this app draws. Silencing the whole loop rather
+    # than just the window creation, since the warning recurs across the
+    # first few imshow calls too. See quiet.py for why fd redirection rather
+    # than a Python-level log setting.
+    with native_stderr_silenced():
+        return _run_preview_loop(cap, face_source, timeout_seconds)
+
+
+def _run_preview_loop(cap, face_source, timeout_seconds: float) -> bool:
     cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(WINDOW, 960, 720)
 
