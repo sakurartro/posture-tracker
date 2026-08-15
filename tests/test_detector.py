@@ -1,5 +1,5 @@
+from posture_tracker.config import Settings
 from posture_tracker.detector import (
-    Baseline,
     Deviation,
     DeviationSmoother,
     HysteresisTimer,
@@ -28,80 +28,8 @@ def make_pose(
     )
 
 
-def test_compute_baseline_averages_samples():
-    samples = [make_pose(), make_pose()]
-    baseline = compute_baseline(samples)
-    assert baseline.head_tilt_deg == 0.0
-    assert baseline.shoulder_tilt_deg == 0.0
-    assert baseline.head_height_ratio > 0
-
-
-def test_compute_deviation_zero_when_matching_baseline():
-    pose = make_pose()
-    baseline = compute_baseline([pose])
-    deviation = compute_deviation(pose, baseline)
-    assert deviation.head_tilt_deg == 0.0
-    assert deviation.shoulder_tilt_deg == 0.0
-    assert deviation.slouch_pct == 0.0
-
-
-def test_compute_deviation_detects_head_tilt():
-    baseline = compute_baseline([make_pose()])
-    tilted = make_pose(left_ear=(0.45, 0.20), right_ear=(0.55, 0.28))
-    deviation = compute_deviation(tilted, baseline)
-    assert deviation.head_tilt_deg != 0.0
-
-
-def scaled(pose: PoseLandmarks, factor: float, shift: float = 0.0) -> PoseLandmarks:
-    """The same posture seen from further away (everything shrinks towards a
-    point) and shifted in frame."""
-
-    def s(lm: Landmark) -> Landmark:
-        return Landmark(
-            x=lm.x * factor + shift,
-            y=lm.y * factor + shift,
-            visibility=lm.visibility,
-        )
-
-    return PoseLandmarks(
-        nose=s(pose.nose),
-        left_ear=s(pose.left_ear),
-        right_ear=s(pose.right_ear),
-        left_shoulder=s(pose.left_shoulder),
-        right_shoulder=s(pose.right_shoulder),
-    )
-
-
-def test_slouch_metric_ignores_distance_from_camera():
-    # Rolling the chair back shrinks every on-screen length at once. That is
-    # not a posture change and must not register as one -- the previous raw
-    # nose-to-shoulder distance moved ~20% on chair movement alone, well past
-    # the 12% violation threshold.
-    upright = make_camera_pose()
-    baseline = compute_baseline([upright])
-
-    for factor in (0.6, 0.8, 1.25):
-        deviation = compute_deviation(scaled(upright, factor, shift=0.05), baseline)
-        assert abs(deviation.slouch_pct) < 1.0, f"drifted at scale {factor}"
-
-
-def test_slouch_metric_detects_head_dropping_towards_shoulders():
-    baseline = compute_baseline([make_camera_pose()])
-    # Same framing, but the head sinks towards the shoulder line.
-    slouched = make_camera_pose(nose_y=0.42)
-    deviation = compute_deviation(slouched, baseline)
-    assert deviation.slouch_pct < -20.0
-
-
-def test_compute_deviation_detects_slouch():
-    baseline = compute_baseline([make_pose()])
-    # Nose rides higher above the shoulder line -> ratio increases.
-    leaning = make_pose(nose=(0.5, 0.1))
-    deviation = compute_deviation(leaning, baseline)
-    assert deviation.slouch_pct > 0
-
-
-def make_camera_pose(head_dy=0.0, shoulder_dy=0.0, nose_y=0.3) -> PoseLandmarks:
+def make_camera_pose(head_dy=0.0, shoulder_dy=0.0, nose_y=0.30,
+                     shoulder_y=0.50, shoulder_visibility=1.0) -> PoseLandmarks:
     """Mimics what a real webcam actually produces.
 
     MediaPipe labels landmarks anatomically and a webcam feed is not
@@ -113,9 +41,68 @@ def make_camera_pose(head_dy=0.0, shoulder_dy=0.0, nose_y=0.3) -> PoseLandmarks:
         nose=Landmark(0.50, nose_y),
         left_ear=Landmark(0.55, 0.28 + head_dy),
         right_ear=Landmark(0.45, 0.28),
-        left_shoulder=Landmark(0.60, 0.50 + shoulder_dy),
-        right_shoulder=Landmark(0.40, 0.50),
+        left_shoulder=Landmark(0.60, shoulder_y + shoulder_dy, shoulder_visibility),
+        right_shoulder=Landmark(0.40, shoulder_y, shoulder_visibility),
     )
+
+
+def scaled(pose: PoseLandmarks, factor: float, shift: float = 0.0) -> PoseLandmarks:
+    """The same posture seen from further away (everything shrinks towards a
+    point) and shifted in frame."""
+
+    def s(lm: Landmark) -> Landmark:
+        return Landmark(x=lm.x * factor + shift, y=lm.y * factor + shift,
+                        visibility=lm.visibility)
+
+    return PoseLandmarks(
+        nose=s(pose.nose),
+        left_ear=s(pose.left_ear),
+        right_ear=s(pose.right_ear),
+        left_shoulder=s(pose.left_shoulder),
+        right_shoulder=s(pose.right_shoulder),
+    )
+
+
+def test_compute_baseline_medians_samples():
+    baseline = compute_baseline([make_pose(), make_pose()])
+    assert baseline.head_tilt_deg == 0.0
+    # No shoulder confidence bar was supplied, so shoulders go unjudged.
+    assert baseline.shoulder_tilt_deg is None
+
+
+def test_compute_deviation_zero_when_matching_baseline():
+    pose = make_pose()
+    baseline = compute_baseline([pose])
+    deviation = compute_deviation(pose, baseline)
+    assert deviation.head_tilt_deg == 0.0
+    assert deviation.head_pitch_deg == 0.0
+
+
+def test_compute_deviation_detects_head_tilt():
+    baseline = compute_baseline([make_pose()])
+    tilted = make_pose(left_ear=(0.45, 0.20), right_ear=(0.55, 0.28))
+    deviation = compute_deviation(tilted, baseline)
+    assert deviation.head_tilt_deg != 0.0
+
+
+def test_head_pitch_ignores_distance_from_camera():
+    # Rolling the chair back shrinks every on-screen length at once. That is
+    # not a posture change and must not register as one -- the raw
+    # nose-to-shoulder distance this replaced moved ~20% on chair movement
+    # alone, well past the violation threshold.
+    upright = make_camera_pose()
+    baseline = compute_baseline([upright])
+
+    for factor in (0.6, 0.8, 1.25):
+        deviation = compute_deviation(scaled(upright, factor, shift=0.05), baseline)
+        assert abs(deviation.head_pitch_deg) < 0.5, f"drifted at scale {factor}"
+
+
+def test_head_pitch_detects_the_chin_dropping():
+    baseline = compute_baseline([make_camera_pose()])
+    # Same framing, but the nose sinks below the ear line.
+    deviation = compute_deviation(make_camera_pose(nose_y=0.42), baseline)
+    assert deviation.head_pitch_deg > 20.0
 
 
 def test_baseline_is_level_for_non_mirrored_camera_layout():
@@ -126,15 +113,50 @@ def test_baseline_is_level_for_non_mirrored_camera_layout():
     # every later frame read as tens of degrees off and the app reported bad
     # posture permanently.
     samples = [make_camera_pose(head_dy=dy) for dy in (0.001, -0.001, 0.0005, -0.0005)]
-    baseline = compute_baseline(samples)
+    baseline = compute_baseline(samples, shoulder_min_visibility=0.7)
 
     assert abs(baseline.head_tilt_deg) < 5.0
+    assert baseline.shoulder_tilt_deg is not None
     assert abs(baseline.shoulder_tilt_deg) < 5.0
 
     # ...and a level pose must then read as no deviation at all.
-    deviation = compute_deviation(make_camera_pose(), baseline)
+    deviation = compute_deviation(make_camera_pose(), baseline, shoulder_min_visibility=0.7)
     assert abs(deviation.head_tilt_deg) < 5.0
+    assert deviation.shoulder_tilt_deg is not None
     assert abs(deviation.shoulder_tilt_deg) < 5.0
+
+
+def test_shoulders_below_the_frame_edge_are_not_trusted():
+    # MediaPipe still reports a position for joints it cannot see, so a high
+    # visibility score alone is not enough -- on a laptop webcam the shoulders
+    # sit past the bottom edge (y > 1.0) while still scoring up to 0.86.
+    out_of_frame = make_camera_pose(shoulder_y=1.05, shoulder_visibility=0.86)
+    assert out_of_frame.shoulders_usable(0.7) is False
+    assert out_of_frame.face_visible(0.5) is True
+
+
+def test_shoulder_tilt_is_skipped_when_shoulders_are_out_of_frame():
+    baseline = compute_baseline(
+        [make_camera_pose(shoulder_y=1.05)], shoulder_min_visibility=0.7
+    )
+    assert baseline.shoulder_tilt_deg is None
+
+    deviation = compute_deviation(
+        make_camera_pose(shoulder_y=1.05), baseline, shoulder_min_visibility=0.7
+    )
+    assert deviation.shoulder_tilt_deg is None
+
+
+def test_an_unmeasurable_shoulder_does_not_count_as_bad_posture():
+    settings = Settings()
+    deviation = Deviation(head_tilt_deg=0.0, head_pitch_deg=0.0, shoulder_tilt_deg=None)
+    assert deviation.within(settings) is True
+
+
+def test_a_measured_crooked_shoulder_does_count():
+    settings = Settings()
+    deviation = Deviation(head_tilt_deg=0.0, head_pitch_deg=0.0, shoulder_tilt_deg=40.0)
+    assert deviation.within(settings) is False
 
 
 def test_real_tilt_still_detected_with_camera_layout():
@@ -294,8 +316,8 @@ def test_hysteresis_without_notify_threshold_never_notifies():
     assert result.should_notify is False
 
 
-def dev(head=0.0, shoulder=0.0, slouch=0.0) -> Deviation:
-    return Deviation(head_tilt_deg=head, shoulder_tilt_deg=shoulder, slouch_pct=slouch)
+def dev(head=0.0, pitch=0.0, shoulder=None) -> Deviation:
+    return Deviation(head_tilt_deg=head, head_pitch_deg=pitch, shoulder_tilt_deg=shoulder)
 
 
 def test_smoother_passes_the_first_sample_through_unchanged():

@@ -57,9 +57,14 @@ def _deviation_table(state: DashboardState) -> Table:
         table.add_row("—", "no data")
     else:
         d = state.deviation
-        table.add_row("Head tilt", f"{d.head_tilt_deg:+.1f}°")
-        table.add_row("Shoulder tilt", f"{d.shoulder_tilt_deg:+.1f}°")
-        table.add_row("Slouch", f"{d.slouch_pct:+.1f}%")
+        table.add_row("Head tilt (sideways)", f"{d.head_tilt_deg:+.1f}°")
+        table.add_row("Head pitch (slouch)", f"{d.head_pitch_deg:+.1f}°")
+        if d.shoulder_tilt_deg is None:
+            # Shoulders out of frame: say so, rather than showing a number
+            # derived from where MediaPipe guesses they are.
+            table.add_row("Shoulder tilt", "[dim]not in frame[/dim]")
+        else:
+            table.add_row("Shoulder tilt", f"{d.shoulder_tilt_deg:+.1f}°")
     return table
 
 

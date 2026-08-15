@@ -38,6 +38,7 @@ from posture_tracker.config import (
     MIN_LANDMARK_VISIBILITY,
     POSE_MODEL_PATH,
     POSE_MODEL_URL,
+    SHOULDER_MIN_VISIBILITY,
     Settings,
     parse_args,
 )
@@ -251,7 +252,7 @@ def _read_landmarks(cap: cv2.VideoCapture, pose_source: PoseSource, min_visibili
         left_shoulder=get(_IDX_LEFT_SHOULDER),
         right_shoulder=get(_IDX_RIGHT_SHOULDER),
     )
-    if not pts.visible(min_visibility):
+    if not pts.face_visible(min_visibility):
         return None
     return pts
 
@@ -328,7 +329,7 @@ def _calibrate(
 
     if stop_event.is_set() or not samples:
         return None
-    return compute_baseline(samples)
+    return compute_baseline(samples, shoulder_min_visibility=SHOULDER_MIN_VISIBILITY)
 
 
 def run_capture_loop(
@@ -386,7 +387,11 @@ def run_capture_loop(
                     result = timer.update(None)
                     deviation = None
                 else:
-                    deviation = smoother.update(compute_deviation(landmarks, baseline))
+                    deviation = smoother.update(
+                        compute_deviation(
+                            landmarks, baseline, shoulder_min_visibility=SHOULDER_MIN_VISIBILITY
+                        )
+                    )
                     result = timer.update(deviation.within(settings))
 
                 total_elapsed += dt

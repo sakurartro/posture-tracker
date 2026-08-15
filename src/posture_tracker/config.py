@@ -18,8 +18,8 @@ GRACE_PERIOD_SECONDS = 10.0
 ANALYSIS_FPS = 5
 
 HEAD_TILT_THRESHOLD_DEG = 8.0
+HEAD_PITCH_THRESHOLD_DEG = 6.0
 SHOULDER_TILT_THRESHOLD_DEG = 10.0
-SLOUCH_THRESHOLD_PCT = 12.0
 
 # Weight of the newest sample in the deviation moving average. Landmark jitter
 # alone can cross a threshold; averaging over roughly the last second keeps the
@@ -30,6 +30,15 @@ DEFAULT_CAMERA_DEVICE = "/dev/video0"
 
 # Below this MediaPipe landmark visibility score, a keypoint is treated as absent.
 MIN_LANDMARK_VISIBILITY = 0.5
+
+# Shoulders get a stricter bar than face landmarks. MediaPipe reports
+# coordinates even for joints it cannot see, extrapolated from the rest of the
+# body, and on a laptop webcam pointed at the face the shoulders are usually
+# below the bottom edge entirely -- measured across 130 samples on this setup,
+# never once in frame, yet still reported with visibility up to 0.86. Metrics
+# built on those guesses are noise, so shoulder-based checks are skipped unless
+# the joints are confidently seen inside the frame.
+SHOULDER_MIN_VISIBILITY = 0.7
 
 # MediaPipe's legacy `mp.solutions.pose` API is no longer shipped in current
 # pip wheels (verified absent in mediapipe 0.10.35 / 1.0.1 for Python 3.12) —
@@ -52,8 +61,8 @@ class Settings:
     grace_period_seconds: float = GRACE_PERIOD_SECONDS
     analysis_fps: int = ANALYSIS_FPS
     head_tilt_threshold_deg: float = HEAD_TILT_THRESHOLD_DEG
+    head_pitch_threshold_deg: float = HEAD_PITCH_THRESHOLD_DEG
     shoulder_tilt_threshold_deg: float = SHOULDER_TILT_THRESHOLD_DEG
-    slouch_threshold_pct: float = SLOUCH_THRESHOLD_PCT
 
 
 def parse_args(argv: list[str] | None = None) -> Settings:
@@ -80,12 +89,15 @@ def parse_args(argv: list[str] | None = None) -> Settings:
     parser.add_argument("--fps", type=int, default=ANALYSIS_FPS, dest="analysis_fps",
                          help="Analysis loop target frames per second")
     parser.add_argument("--head-tilt-threshold", type=float, default=HEAD_TILT_THRESHOLD_DEG,
-                         dest="head_tilt_threshold_deg", help="Allowed head tilt deviation, degrees")
+                         dest="head_tilt_threshold_deg",
+                         help="Allowed sideways head tilt deviation, degrees")
+    parser.add_argument("--head-pitch-threshold", type=float, default=HEAD_PITCH_THRESHOLD_DEG,
+                         dest="head_pitch_threshold_deg",
+                         help="Allowed forward head/chin drop deviation, degrees (the slouch check)")
     parser.add_argument("--shoulder-tilt-threshold", type=float, default=SHOULDER_TILT_THRESHOLD_DEG,
-                         dest="shoulder_tilt_threshold_deg", help="Allowed shoulder tilt deviation, degrees")
-    parser.add_argument("--slouch-threshold", type=float, default=SLOUCH_THRESHOLD_PCT,
-                         dest="slouch_threshold_pct",
-                         help="Allowed nose-to-shoulder-line distance change, percent")
+                         dest="shoulder_tilt_threshold_deg",
+                         help="Allowed shoulder tilt deviation, degrees "
+                              "(only checked when the shoulders are actually in frame)")
 
     ns = parser.parse_args(argv)
     return Settings(**vars(ns))

@@ -42,38 +42,60 @@ class PoseLandmarks:
     left_shoulder: Landmark
     right_shoulder: Landmark
 
-    def visible(self, min_visibility: float) -> bool:
+    def face_visible(self, min_visibility: float) -> bool:
+        """Whether there is a subject to judge at all.
+
+        Only face landmarks count. They are the reliable ones -- measured at
+        0.98+ visibility on a laptop webcam -- and requiring shoulders here
+        used to blank out tracking exactly when the user slouched, which is
+        the moment that matters most.
+        """
         return all(
             lm.visibility >= min_visibility
-            for lm in (
-                self.nose,
-                self.left_ear,
-                self.right_ear,
-                self.left_shoulder,
-                self.right_shoulder,
-            )
+            for lm in (self.nose, self.left_ear, self.right_ear)
+        )
+
+    def shoulders_usable(self, min_visibility: float) -> bool:
+        """Whether the shoulders were actually seen, rather than guessed.
+
+        MediaPipe reports coordinates for joints outside the frame too,
+        extrapolated from the rest of the body and betrayed only by a lower
+        visibility score and a y past the frame edge. Anything derived from
+        those is noise, so the y bound is checked as well as the score.
+        """
+        return all(
+            lm.visibility >= min_visibility and 0.0 <= lm.y <= 1.0
+            for lm in (self.left_shoulder, self.right_shoulder)
         )
 
 
 @dataclass(frozen=True)
 class Baseline:
     head_tilt_deg: float
-    shoulder_tilt_deg: float
-    head_height_ratio: float
+    head_pitch_deg: float
+    # None when the shoulders were never properly in frame during calibration,
+    # in which case shoulder tilt is not judged at all.
+    shoulder_tilt_deg: float | None
 
 
 @dataclass(frozen=True)
 class Deviation:
     head_tilt_deg: float
-    shoulder_tilt_deg: float
-    slouch_pct: float
+    head_pitch_deg: float
+    shoulder_tilt_deg: float | None = None
 
     def within(self, settings: Settings) -> bool:
-        return (
-            abs(self.head_tilt_deg) <= settings.head_tilt_threshold_deg
-            and abs(self.shoulder_tilt_deg) <= settings.shoulder_tilt_threshold_deg
-            and abs(self.slouch_pct) <= settings.slouch_threshold_pct
-        )
+        if abs(self.head_tilt_deg) > settings.head_tilt_threshold_deg:
+            return False
+        if abs(self.head_pitch_deg) > settings.head_pitch_threshold_deg:
+            return False
+        # An unmeasurable shoulder is not a crooked shoulder.
+        if (
+            self.shoulder_tilt_deg is not None
+            and abs(self.shoulder_tilt_deg) > settings.shoulder_tilt_threshold_deg
+        ):
+            return False
+        return True
 
 
 def _tilt_angle_deg(left: Landmark, right: Landmark) -> float:
@@ -112,64 +134,91 @@ def _shoulder_midpoint(landmarks: PoseLandmarks) -> tuple[float, float]:
     return mx, my
 
 
-def _head_height_ratio(landmarks: PoseLandmarks) -> float:
-    """How high the head rides above the shoulder line, relative to shoulder width.
+def _head_pitch_deg(landmarks: PoseLandmarks) -> float:
+    """How far the nose has dropped below the line between the ears.
 
-    Slouching drops the head toward the shoulders, so this shrinks. Dividing
-    by shoulder width is what makes it a *posture* measure rather than a
-    *distance-to-camera* measure: rolling the chair back shrinks every
-    on-screen length at once, leaving the ratio unchanged, whereas the raw
-    nose-to-shoulder distance this replaced moved by more than the violation
-    threshold on chair movement alone.
+    This is the slouch signal. Letting the chin sink towards the chest --
+    the classic desk slouch -- swings the nose downward relative to the ears;
+    measured on a real session, roughly 2 deg sitting upright against 10 deg
+    slouching.
+
+    Expressed as an angle against the ear separation rather than a raw
+    distance, which makes it immune to how far the chair is from the camera:
+    both quantities scale together, so only the actual head geometry moves it.
+    It uses face landmarks alone (visibility 0.98+) rather than the shoulders,
+    which a laptop webcam typically cannot see at all.
     """
-    width = math.hypot(
-        landmarks.right_shoulder.x - landmarks.left_shoulder.x,
-        landmarks.right_shoulder.y - landmarks.left_shoulder.y,
+    ear_span = math.hypot(
+        landmarks.right_ear.x - landmarks.left_ear.x,
+        landmarks.right_ear.y - landmarks.left_ear.y,
     )
-    if width <= 0:
+    if ear_span <= 0:
         return 0.0
-    _, shoulder_y = _shoulder_midpoint(landmarks)
-    return (shoulder_y - landmarks.nose.y) / width
+    ear_mid_y = (landmarks.left_ear.y + landmarks.right_ear.y) / 2
+    return math.degrees(math.atan2(landmarks.nose.y - ear_mid_y, ear_span))
 
 
-def compute_baseline(samples: list[PoseLandmarks]) -> Baseline:
+def compute_baseline(
+    samples: list[PoseLandmarks],
+    shoulder_min_visibility: float | None = None,
+) -> Baseline:
     """Reduce calibration samples to a reference posture.
 
     Uses the median rather than the mean: a few bad frames (the user still
     settling into the chair, a momentary mis-detection) would drag a mean far
     enough to bias every later comparison, and a skewed baseline shows up as
     permanent false "bad posture".
+
+    A shoulder baseline is only established if the shoulders were genuinely
+    in frame for most of calibration; otherwise it stays None and shoulder
+    tilt is left unjudged rather than judged against a guess.
     """
     if not samples:
         raise ValueError("cannot compute baseline from zero samples")
+
+    shoulder_tilt = None
+    if shoulder_min_visibility is not None:
+        usable = [s for s in samples if s.shoulders_usable(shoulder_min_visibility)]
+        if len(usable) >= len(samples) / 2:
+            shoulder_tilt = statistics.median(
+                _tilt_angle_deg(s.left_shoulder, s.right_shoulder) for s in usable
+            )
 
     return Baseline(
         head_tilt_deg=statistics.median(
             _tilt_angle_deg(s.left_ear, s.right_ear) for s in samples
         ),
-        shoulder_tilt_deg=statistics.median(
-            _tilt_angle_deg(s.left_shoulder, s.right_shoulder) for s in samples
-        ),
-        head_height_ratio=statistics.median(
-            _head_height_ratio(s) for s in samples
-        ),
+        head_pitch_deg=statistics.median(_head_pitch_deg(s) for s in samples),
+        shoulder_tilt_deg=shoulder_tilt,
     )
 
 
-def compute_deviation(landmarks: PoseLandmarks, baseline: Baseline) -> Deviation:
+def compute_deviation(
+    landmarks: PoseLandmarks,
+    baseline: Baseline,
+    shoulder_min_visibility: float | None = None,
+) -> Deviation:
     head_tilt = _normalize_tilt_diff_deg(
         _tilt_angle_deg(landmarks.left_ear, landmarks.right_ear) - baseline.head_tilt_deg
     )
-    shoulder_tilt = _normalize_tilt_diff_deg(
-        _tilt_angle_deg(landmarks.left_shoulder, landmarks.right_shoulder) - baseline.shoulder_tilt_deg
-    )
-    ratio = _head_height_ratio(landmarks)
-    if baseline.head_height_ratio > 0:
-        slouch_pct = (ratio - baseline.head_height_ratio) / baseline.head_height_ratio * 100
-    else:
-        slouch_pct = 0.0
+    head_pitch = _head_pitch_deg(landmarks) - baseline.head_pitch_deg
 
-    return Deviation(head_tilt_deg=head_tilt, shoulder_tilt_deg=shoulder_tilt, slouch_pct=slouch_pct)
+    shoulder_tilt = None
+    if (
+        baseline.shoulder_tilt_deg is not None
+        and shoulder_min_visibility is not None
+        and landmarks.shoulders_usable(shoulder_min_visibility)
+    ):
+        shoulder_tilt = _normalize_tilt_diff_deg(
+            _tilt_angle_deg(landmarks.left_shoulder, landmarks.right_shoulder)
+            - baseline.shoulder_tilt_deg
+        )
+
+    return Deviation(
+        head_tilt_deg=head_tilt,
+        head_pitch_deg=head_pitch,
+        shoulder_tilt_deg=shoulder_tilt,
+    )
 
 
 class DeviationSmoother:
@@ -198,10 +247,20 @@ class DeviationSmoother:
 
         a = self._alpha
         prev = self._current
+
+        def blend(new: float | None, old: float | None) -> float | None:
+            # A metric that just became measurable (or stopped being) starts
+            # fresh rather than blending against a value that is not there.
+            if new is None:
+                return None
+            if old is None:
+                return new
+            return a * new + (1 - a) * old
+
         self._current = Deviation(
             head_tilt_deg=a * deviation.head_tilt_deg + (1 - a) * prev.head_tilt_deg,
-            shoulder_tilt_deg=a * deviation.shoulder_tilt_deg + (1 - a) * prev.shoulder_tilt_deg,
-            slouch_pct=a * deviation.slouch_pct + (1 - a) * prev.slouch_pct,
+            head_pitch_deg=a * deviation.head_pitch_deg + (1 - a) * prev.head_pitch_deg,
+            shoulder_tilt_deg=blend(deviation.shoulder_tilt_deg, prev.shoulder_tilt_deg),
         )
         return self._current
 
