@@ -68,6 +68,39 @@ def _format_duration(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
+def _posture_style(pct: float) -> str:
+    if pct >= 85:
+        return "green"
+    if pct >= 60:
+        return "yellow"
+    return "red"
+
+
+def render_stats(periods) -> Panel:
+    """A table of PeriodStats rows: today, week, month, all time."""
+    table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
+    table.add_column("Period")
+    table.add_column("Tracked", justify="right")
+    table.add_column("Good posture", justify="right")
+    table.add_column("Violations", justify="right")
+    table.add_column("Sessions", justify="right")
+
+    for p in periods:
+        if p.tracked_seconds <= 0:
+            table.add_row(p.label, "—", "[dim]no data[/dim]", "—", "0")
+            continue
+        pct = p.good_posture_pct
+        table.add_row(
+            p.label,
+            _format_duration(p.tracked_seconds),
+            f"[{_posture_style(pct)}]{pct:.0f}%[/{_posture_style(pct)}]",
+            str(p.violation_count),
+            str(p.session_count),
+        )
+
+    return Panel(table, title="Posture Tracker — statistics")
+
+
 def render_dashboard(state: DashboardState) -> Panel:
     if state.countdown_seconds is not None:
         body = Text(

@@ -65,8 +65,15 @@ FACE_MODEL_PATH = Path.home() / ".local" / "share" / "posture-tracker" / "models
 
 @dataclass(frozen=True)
 class Settings:
+    """Behaviour knobs.
+
+    Deliberately not exposed on the command line: the app has a three-command
+    surface (set up, check stats, stop) and every one of these has a value that
+    was chosen from measurements rather than guessed. Edit them here if you
+    need to.
+    """
+
     camera: str = DEFAULT_CAMERA_DEVICE
-    check_camera: bool = False
     calibration_countdown_seconds: float = CALIBRATION_COUNTDOWN_SECONDS
     calibration_seconds: float = CALIBRATION_SECONDS
     smoothing_alpha: float = SMOOTHING_ALPHA
@@ -77,38 +84,37 @@ class Settings:
     head_pitch_threshold_deg: float = HEAD_PITCH_THRESHOLD_DEG
 
 
-def parse_args(argv: list[str] | None = None) -> Settings:
+@dataclass(frozen=True)
+class Command:
+    """What the user asked for."""
+
+    calibrate: bool = False  # redo calibration even if already set up
+    stats: bool = False
+    stop: bool = False
+    foreground: bool = False  # run the tracker here; also what autostart uses
+
+
+def parse_args(argv: list[str] | None = None) -> Command:
     parser = argparse.ArgumentParser(
         prog="posture-tracker",
-        description="Real-time posture tracker using a webcam.",
+        description=(
+            "Reminds you to sit up straight, using your webcam. "
+            "Run with no arguments to set it up: it checks the camera can see you, "
+            "calibrates against your good posture, then keeps watching in the "
+            "background and starts itself again at every login."
+        ),
     )
-    parser.add_argument("--camera", default=DEFAULT_CAMERA_DEVICE,
-                         help=f"Camera device path or index (default: {DEFAULT_CAMERA_DEVICE})")
-    parser.add_argument("--check-camera", action="store_true", dest="check_camera",
-                         help="Open a mirrored preview to aim the camera, then exit. "
-                              "Run this first if the tracker cannot see you.")
-    parser.add_argument("--calibration-countdown", type=float, default=CALIBRATION_COUNTDOWN_SECONDS,
-                         dest="calibration_countdown_seconds",
-                         help="Seconds of countdown to get into position before calibration samples")
-    parser.add_argument("--calibration-seconds", type=float, default=CALIBRATION_SECONDS,
-                         help="Seconds to hold still during calibration")
-    parser.add_argument("--smoothing", type=float, default=SMOOTHING_ALPHA, dest="smoothing_alpha",
-                         help="Moving-average weight for the newest sample, 0-1 "
-                              "(lower = steadier but slower to react)")
-    parser.add_argument("--notify-after", type=float, default=NOTIFY_AFTER_SECONDS,
-                         dest="notify_after_seconds",
-                         help="Seconds of continuous bad posture before a desktop notification fires")
-    parser.add_argument("--grace-period", type=float, default=GRACE_PERIOD_SECONDS,
-                         dest="grace_period_seconds",
-                         help="Seconds of continuous bad posture before the fullscreen overlay fires")
-    parser.add_argument("--fps", type=int, default=ANALYSIS_FPS, dest="analysis_fps",
-                         help="Analysis loop target frames per second")
-    parser.add_argument("--head-tilt-threshold", type=float, default=HEAD_TILT_THRESHOLD_DEG,
-                         dest="head_tilt_threshold_deg",
-                         help="Allowed sideways head tilt deviation, degrees")
-    parser.add_argument("--head-pitch-threshold", type=float, default=HEAD_PITCH_THRESHOLD_DEG,
-                         dest="head_pitch_threshold_deg",
-                         help="Allowed forward head/chin drop deviation, degrees (the slouch check)")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--stats", action="store_true",
+                       help="Show posture statistics for today, the last week and the last month")
+    group.add_argument("--stop", action="store_true",
+                       help="Stop the background tracker and remove it from autostart")
+    group.add_argument("--calibrate", action="store_true",
+                       help="Calibrate again, e.g. after moving the laptop or changing chair")
+    group.add_argument("--foreground", action="store_true",
+                       help="Run the tracker in this terminal, with the live dashboard, "
+                            "instead of in the background (this is what autostart runs)")
 
     ns = parser.parse_args(argv)
-    return Settings(**vars(ns))
+    return Command(calibrate=ns.calibrate, stats=ns.stats, stop=ns.stop,
+                   foreground=ns.foreground)

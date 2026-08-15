@@ -1,57 +1,131 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from posture_tracker.storage import SessionSummary, load_sessions, save_session
+from posture_tracker.storage import (
+    SessionSummary,
+    load_baseline,
+    load_sessions,
+    period_stats,
+    save_baseline,
+    save_session,
+)
+
+
+def summary(started_at, duration=600.0, tracked=600.0, good=500.0, violations=2):
+    return SessionSummary(
+        started_at=started_at,
+        duration_seconds=duration,
+        tracked_seconds=tracked,
+        good_seconds=good,
+        violation_count=violations,
+    )
 
 
 def test_save_and_load_session(tmp_path: Path):
-    db_path = tmp_path / "posture.db"
-    summary = SessionSummary(
-        started_at=datetime(2026, 8, 15, 10, 0, tzinfo=timezone.utc),
-        duration_seconds=1234.5,
-        good_posture_pct=87.3,
-        violation_count=4,
-    )
+    db = tmp_path / "posture.db"
+    started = datetime(2026, 8, 15, 10, 0, tzinfo=timezone.utc)
+    save_session(summary(started), db_path=db)
 
-    save_session(summary, db_path=db_path)
-    loaded = load_sessions(db_path=db_path)
-
+    loaded = load_sessions(db_path=db)
     assert len(loaded) == 1
-    assert loaded[0].duration_seconds == 1234.5
-    assert loaded[0].good_posture_pct == 87.3
-    assert loaded[0].violation_count == 4
-    assert loaded[0].started_at == summary.started_at
+    assert loaded[0].started_at == started
+    assert loaded[0].tracked_seconds == 600.0
+    assert loaded[0].good_seconds == 500.0
+    assert loaded[0].violation_count == 2
 
 
-def test_multiple_sessions_ordered_by_start_time(tmp_path: Path):
-    db_path = tmp_path / "posture.db"
-    first = SessionSummary(
-        started_at=datetime(2026, 8, 14, 9, 0, tzinfo=timezone.utc),
-        duration_seconds=600,
-        good_posture_pct=90,
-        violation_count=1,
-    )
-    second = SessionSummary(
-        started_at=datetime(2026, 8, 15, 9, 0, tzinfo=timezone.utc),
-        duration_seconds=700,
-        good_posture_pct=80,
-        violation_count=2,
-    )
+def test_good_posture_pct_is_derived_from_seconds():
+    assert summary(datetime.now(timezone.utc), tracked=100, good=75).good_posture_pct == 75.0
 
-    save_session(second, db_path=db_path)
-    save_session(first, db_path=db_path)
 
-    loaded = load_sessions(db_path=db_path)
-    assert [s.started_at for s in loaded] == [first.started_at, second.started_at]
+def test_good_posture_pct_when_never_tracked():
+    # Nothing observed is not a failing grade.
+    assert summary(datetime.now(timezone.utc), tracked=0, good=0).good_posture_pct == 100.0
 
 
 def test_db_directory_is_created_if_missing(tmp_path: Path):
-    db_path = tmp_path / "nested" / "dir" / "posture.db"
-    summary = SessionSummary(
-        started_at=datetime(2026, 8, 15, 10, 0, tzinfo=timezone.utc),
-        duration_seconds=10,
-        good_posture_pct=100,
-        violation_count=0,
+    db = tmp_path / "nested" / "dir" / "posture.db"
+    save_session(summary(datetime.now(timezone.utc)), db_path=db)
+    assert db.exists()
+
+
+def test_period_stats_only_counts_sessions_inside_the_window(tmp_path: Path):
+    db = tmp_path / "posture.db"
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    save_session(summary(now - timedelta(days=2), tracked=100, good=100, violations=0), db_path=db)
+    save_session(summary(now - timedelta(days=40), tracked=900, good=0, violations=9), db_path=db)
+
+    week = period_stats("week", now - timedelta(days=7), db_path=db)
+    assert week.session_count == 1
+    assert week.tracked_seconds == 100
+    assert week.violation_count == 0
+
+    everything = period_stats("all", None, db_path=db)
+    assert everything.session_count == 2
+    assert everything.tracked_seconds == 1000
+
+
+def test_period_stats_weights_by_time_not_by_session(tmp_path: Path):
+    # A short perfect session must not cancel out a long bad one; averaging
+    # per-session percentages would say 50%, the truth is 10%.
+    db = tmp_path / "posture.db"
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    save_session(summary(now, tracked=100, good=100, violations=0), db_path=db)
+    save_session(summary(now, tracked=900, good=0, violations=5), db_path=db)
+
+    stats = period_stats("all", None, db_path=db)
+    assert stats.good_posture_pct == 10.0
+    assert stats.violation_count == 5
+
+
+def test_period_stats_with_no_sessions_is_empty_not_an_error(tmp_path: Path):
+    stats = period_stats("all", None, db_path=tmp_path / "empty.db")
+    assert stats.session_count == 0
+    assert stats.tracked_seconds == 0
+
+
+def test_migrates_a_database_written_by_an_older_version(tmp_path: Path):
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE sessions ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT NOT NULL, "
+        "duration_seconds REAL NOT NULL, good_posture_pct REAL NOT NULL, "
+        "violation_count INTEGER NOT NULL)"
     )
-    save_session(summary, db_path=db_path)
-    assert db_path.exists()
+    conn.execute(
+        "INSERT INTO sessions (started_at, duration_seconds, good_posture_pct, violation_count) "
+        "VALUES (?, ?, ?, ?)",
+        (datetime(2026, 8, 1, tzinfo=timezone.utc).isoformat(), 1000.0, 80.0, 3),
+    )
+    conn.commit()
+    conn.close()
+
+    # History survives, with seconds derived from the old percentage.
+    loaded = load_sessions(db_path=db)
+    assert len(loaded) == 1
+    assert loaded[0].tracked_seconds == 1000.0
+    assert loaded[0].good_seconds == 800.0
+    assert loaded[0].violation_count == 3
+
+    # And the migrated database still accepts new rows.
+    save_session(summary(datetime(2026, 8, 2, tzinfo=timezone.utc)), db_path=db)
+    assert len(load_sessions(db_path=db)) == 2
+
+
+def test_baseline_round_trip(tmp_path: Path):
+    path = tmp_path / "baseline.json"
+    save_baseline(-1.25, 6.5, path=path)
+    assert load_baseline(path=path) == (-1.25, 6.5)
+
+
+def test_load_baseline_when_never_calibrated(tmp_path: Path):
+    assert load_baseline(path=tmp_path / "missing.json") is None
+
+
+def test_load_baseline_survives_a_corrupt_file(tmp_path: Path):
+    path = tmp_path / "baseline.json"
+    path.write_text("{ not json")
+    assert load_baseline(path=path) is None

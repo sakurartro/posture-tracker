@@ -1,13 +1,10 @@
 # Posture Tracker
 
-A real-time posture-tracking CLI app, using a webcam.
+Reminds you to sit up straight, using your webcam. Runs entirely on your
+machine — no video ever leaves it, and nothing is sent anywhere.
 
-Runs fully locally: MediaPipe Face Landmarker reads the head's 3D orientation,
-Rich draws a terminal dashboard, a desktop notification fires after a short
-continuous slouch, and a fullscreen tkinter overlay appears if it goes on
-longer. Designed to run in the background — a desktop notification doesn't need
-the terminal in focus, and the app shuts down cleanly on both Ctrl+C and
-`kill`/`systemctl stop` (SIGTERM).
+Set it up once. After that it starts itself at every login, watches quietly in
+the background, and taps you on the shoulder when you have been slouching.
 
 ## Install
 
@@ -18,88 +15,76 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-## Run
+## Use
 
 ```bash
 posture-tracker
 ```
 
-or without installing the package:
+That is the whole setup. It will:
+
+1. **Check the camera can see you.** A preview opens showing what the detector
+   sees, with a box around your head that turns green once you are properly in
+   frame. Sit how you normally work; it closes by itself.
+2. **Calibrate.** A short countdown, then a few seconds of sampling — sit the
+   way you want to be reminded to sit, because everything afterwards is
+   measured against that.
+3. **Start watching**, in the background, and add itself to autostart so it
+   comes back after a reboot.
+
+Then there are two more commands:
 
 ```bash
-python -m posture_tracker.main
+posture-tracker --stats   # how your posture has been: today, this week, this month
+posture-tracker --stop    # stop it and remove it from autostart
 ```
 
-On first run the app downloads a small (~4MB) MediaPipe face model to
-`~/.local/share/posture-tracker/models/` — this needs internet once; every run
-after that is fully offline.
-
-Startup then runs a short countdown ("get into position") followed by a few
-seconds of calibration — **sit the way you want to be reminded to sit**, since
-everything afterwards is measured relative to that reference posture. If the
-baseline is captured while you are still reaching for the keyboard, the app
-will nag you for the rest of the session; restart it to recalibrate.
-
-### If it cannot see you
+And one for when things move:
 
 ```bash
-posture-tracker --check-camera
+posture-tracker --calibrate   # after moving the laptop, or changing chair
 ```
 
-Opens a mirrored preview showing exactly what the detector sees, with a box
-around your head that turns green once you are properly in frame. The head has
-to be fully inside the picture; sitting off to one side is fine.
+On first run it downloads a small (~4MB) face model to
+`~/.local/share/posture-tracker/models/`. That needs the internet once; every
+run after that is fully offline.
 
-### Flags
+## What it does when you slouch
 
-| Flag | Default | Description |
-|---|---|---|
-| `--camera` | `/dev/video0` | Camera device path or index |
-| `--check-camera` | off | Preview the framing and exit |
-| `--calibration-countdown` | `3.0` | Countdown to get into position before calibration |
-| `--calibration-seconds` | `3.0` | Calibration duration, seconds |
-| `--smoothing` | `0.35` | Moving-average weight for the newest sample (lower = steadier, slower to react) |
-| `--notify-after` | `5.0` | Seconds of continuous bad posture before a desktop notification |
-| `--grace-period` | `10.0` | Seconds of continuous bad posture before the fullscreen overlay |
-| `--fps` | `5` | Analysis loop frame rate |
-| `--head-tilt-threshold` | `8.0` | Allowed sideways head tilt, degrees |
-| `--head-pitch-threshold` | `6.0` | Allowed forward chin drop, degrees (the slouch check) |
+| After | What happens |
+|---|---|
+| 5 seconds | A desktop notification — works whether or not a terminal is open |
+| 10 seconds | A translucent fullscreen overlay: *"Straighten your back!"* |
 
-## Dashboard statuses
+Both timers reset the moment you sit up, so a brief lean to reach for something
+never triggers anything. The overlay closes by itself once your posture is
+back, or with `Esc`. If you leave your desk, tracking pauses — time away counts
+as neither good nor bad posture.
 
-- **[OK]** — posture is good.
-- **[WARN N sec]** — a violation is in progress but hasn't exceeded the overlay grace period yet.
-  Once it passes `--notify-after` (default 5s) a one-off desktop notification fires.
-- **[ALERT]** — `--grace-period` exceeded (default 10s), the fullscreen overlay is active.
-- **[PAUSED]** — no face detected (user stepped away), timer reset.
-
-There are two independent thresholds for the same continuous violation: a
-desktop notification at `--notify-after` seconds (quick heads-up, works even if
-you are not looking at the terminal), and the fullscreen overlay at
-`--grace-period` seconds (longer by default, since it is more disruptive). The
-overlay closes automatically once posture is corrected, or manually via `Esc`.
-
-## Running in the background
-
-The dashboard is nice to watch, but you don't need to: the desktop notification
-is what tells you about a violation, so the app is meant to be started once and
-left running.
+## Watching it live
 
 ```bash
-nohup posture-tracker > ~/.local/share/posture-tracker/run.log 2>&1 &
-disown
+posture-tracker --foreground
 ```
 
-Sit properly *before* launching — calibration happens in the first few seconds
-and you won't see the countdown.
+Runs the tracker in your terminal with a live dashboard (status, session
+stats, current head angles) instead of in the background. This is also what
+the autostart entry runs.
 
-Stop it with `pkill -INT -f posture-tracker` (or `kill`/`systemctl stop`, which
-send SIGTERM) — either way the camera is released and the session is saved.
+## Where things live
 
-## Data
+| Path | What |
+|---|---|
+| `~/.local/share/posture-tracker/posture.db` | Session history, for `--stats` |
+| `~/.local/share/posture-tracker/baseline.json` | Your calibrated posture |
+| `~/.local/share/posture-tracker/tracker.log` | Background tracker output |
+| `~/.config/autostart/posture-tracker.desktop` | Autostart entry |
 
-Each session's summary (duration, % good posture, violation count) is saved to
-SQLite: `~/.local/share/posture-tracker/posture.db`.
+## Tuning
+
+There are no tuning flags on purpose — the surface is deliberately three
+commands. Every threshold lives in `src/posture_tracker/config.py` with a note
+on the measurement behind it, if you want to adjust one.
 
 ## Tests
 
@@ -110,33 +95,37 @@ pytest
 
 ## Design notes
 
-**Why the face model and not MediaPipe Pose.** Pose is a whole-body model, and
-on a laptop webcam there is no body in view — it reported shoulders it could
-not see by extrapolating them, below the bottom edge of the frame in every one
-of 130 measured samples. On a motionless subject its head roll drifted with
-12° of noise against the ~8° being measured. Face Landmarker gives the head's
-3D orientation directly, measures ~0.2° of roll noise in the same conditions,
-costs about a seventh as much per frame, and reports nothing at all when it
-cannot really see a face — which makes "is the user in view" an honest
-question rather than a guess.
+Three things caused nearly every problem worth knowing about:
 
-**Capture resolution matters more than it looks.** The app asks for 1280x720
+**The face model, not MediaPipe Pose.** Pose is a whole-body model, and on a
+laptop webcam there is no body in view — it reported shoulders it could not see
+by extrapolating them, below the bottom edge of frame in every one of 130
+measured samples. On a motionless subject its head roll carried 12° of noise
+against the ~8° being measured. Face Landmarker gives the head's 3D orientation
+directly, measures ~0.2° of roll noise in the same conditions, costs about a
+seventh as much per frame, and reports nothing when it cannot really see a
+face — which makes "is the user there" an honest question rather than a guess.
+
+**Capture resolution decides the field of view.** The app asks for 1280x720
 rather than accepting the driver's default. A MacBook's FaceTime HD sensor
 offers only that mode, so a 640x480 default was produced by cropping the sides
-off the 16:9 sensor — throwing away about a quarter of the horizontal field of
-view, enough to push someone sitting squarely in front of the laptop out past
-the edge of frame. Frames are downscaled again before inference, so the wider
-capture costs nothing.
+off the 16:9 sensor — discarding about a quarter of the horizontal view.
+Measured back to back without the subject moving: at 640x480 the face was not
+detected at all; at 1280x720 it sat dead centre. Frames are downscaled again
+before inference, so the wider capture costs nothing.
 
 **Fresh frames.** The camera produces at 30fps while analysis runs at 5fps, so
 frames pile up in the V4L2 queue and a plain `read()` returns the *oldest* one
-— measured ~3 frames of lag. Neither `CAP_PROP_BUFFERSIZE` nor `CAP_PROP_FPS`
-is honoured by this backend, so the queue is drained explicitly and only the
-newest frame kept.
+— measured ~3 frames of lag, which reads as the app being slow to notice you
+straightened up. Neither `CAP_PROP_BUFFERSIZE` nor `CAP_PROP_FPS` is honoured
+by this backend, so the queue is drained explicitly and only the newest frame
+kept.
 
 ## Known limitations
 
-- Designed for a single monitor; overlay behaviour on multi-monitor setups
-  hasn't been tested.
 - Posture is judged from the head alone. A hunched back held with a level head
   will not be caught.
+- The overlay is written for a single monitor; behaviour on multi-monitor
+  setups has not been tested.
+- Autostart uses the XDG spec, so it works on XFCE, GNOME and KDE, but not on
+  desktops that ignore `~/.config/autostart`.

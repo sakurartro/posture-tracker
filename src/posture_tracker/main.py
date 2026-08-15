@@ -31,7 +31,7 @@ import mediapipe as mp
 from mediapipe.tasks.python import BaseOptions, vision
 from rich.console import Console
 
-from posture_tracker import camera_check, overlay
+from posture_tracker import camera_check, overlay, service, storage, ui
 from posture_tracker.config import (
     CAPTURE_HEIGHT,
     CAPTURE_WIDTH,
@@ -267,12 +267,7 @@ def _setup_state(**overrides) -> DashboardState:
     return DashboardState(**base)
 
 
-def _run_countdown(
-    dashboard: Dashboard,
-    cap: cv2.VideoCapture,
-    settings: Settings,
-    stop_event: threading.Event,
-) -> None:
+def _run_countdown(dashboard: Dashboard, cap, settings: Settings) -> None:
     """Gives the user a few seconds to actually sit the way they want the
     baseline captured, instead of calibrating against whatever posture they
     happened to be in while launching the app.
@@ -284,156 +279,130 @@ def _run_countdown(
     the most expensive part of a frame.
     """
     deadline = time.monotonic() + settings.calibration_countdown_seconds
-    while not stop_event.is_set():
+    while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            break
+            return
         read_fresh_frame(cap)
         dashboard.update(_setup_state(countdown_seconds=math.ceil(remaining)))
         time.sleep(0.05)
 
 
-def _calibrate(
-    dashboard: Dashboard,
-    cap: cv2.VideoCapture,
-    face_source: FaceSource,
-    settings: Settings,
-    stop_event: threading.Event,
-) -> Baseline | None:
+def _collect_baseline(dashboard: Dashboard, cap, face_source: FaceSource,
+                      settings: Settings) -> Baseline | None:
     samples: list[HeadPose] = []
     deadline = time.monotonic() + settings.calibration_seconds
     frame_interval = 1.0 / settings.analysis_fps
 
-    while time.monotonic() < deadline and not stop_event.is_set():
+    while time.monotonic() < deadline:
         loop_start = time.monotonic()
         pose = _read_head_pose(cap, face_source)
         if pose is not None:
             samples.append(pose)
 
-        progress = min(
-            100.0,
-            (settings.calibration_seconds - (deadline - time.monotonic()))
-            / settings.calibration_seconds
-            * 100.0,
-        )
+        progress = min(100.0, (settings.calibration_seconds
+                               - (deadline - time.monotonic()))
+                       / settings.calibration_seconds * 100.0)
         dashboard.update(_setup_state(calibrating=True, calibration_progress=progress))
 
         elapsed = time.monotonic() - loop_start
-        sleep_time = frame_interval - elapsed
-        if sleep_time > 0:
+        if (sleep_time := frame_interval - elapsed) > 0:
             time.sleep(sleep_time)
 
-    if stop_event.is_set() or not samples:
+    if not samples:
         return None
     return compute_baseline(samples)
 
 
-def run_capture_loop(
-    cap: cv2.VideoCapture,
-    settings: Settings,
-    shared: SharedState,
-    stop_event: threading.Event,
-) -> None:
+def run_tracking(cap, settings: Settings, baseline: Baseline,
+                 shared: SharedState, stop_event: threading.Event,
+                 show_dashboard: bool) -> None:
+    """The watching loop. Runs on a background thread while the main thread
+    owns tkinter."""
     console = Console()
-
     session_start = datetime.now(timezone.utc)
-    total_elapsed = 0.0
-    tracked_elapsed = 0.0
-    good_elapsed = 0.0
+    total_elapsed = tracked_elapsed = good_elapsed = 0.0
     violation_count = 0
-    good_pct = 100.0
-    calibrated = False
+
+    timer = HysteresisTimer(
+        grace_period_seconds=settings.grace_period_seconds,
+        notify_after_seconds=settings.notify_after_seconds,
+    )
+    smoother = DeviationSmoother(settings.smoothing_alpha)
+    frame_interval = 1.0 / settings.analysis_fps
+    prev_status = Status.OK
+    last_time = time.monotonic()
 
     try:
-        with FaceSource(FACE_MODEL_PATH) as face_source, Dashboard() as dashboard:
-            _run_countdown(dashboard, cap, settings, stop_event)
-            if stop_event.is_set():
-                return
-
-            baseline = _calibrate(dashboard, cap, face_source, settings, stop_event)
-            if stop_event.is_set():
-                return
-            if baseline is None:
-                console.print(
-                    "[bold red]Calibration failed:[/bold red] no face detected in frame. "
-                    "Check the lighting and camera position, then restart the application."
-                )
-                stop_event.set()
-                return
-
-            calibrated = True
-            timer = HysteresisTimer(
-                grace_period_seconds=settings.grace_period_seconds,
-                notify_after_seconds=settings.notify_after_seconds,
-            )
-            smoother = DeviationSmoother(settings.smoothing_alpha)
-            session_start = datetime.now(timezone.utc)
-            prev_status = Status.OK
-            frame_interval = 1.0 / settings.analysis_fps
-            last_time = time.monotonic()
-
-            while not stop_event.is_set():
-                loop_start = time.monotonic()
-                dt = loop_start - last_time
-                last_time = loop_start
-
-                head_pose = _read_head_pose(cap, face_source)
-                if head_pose is None:
-                    smoother.reset()
-                    result = timer.update(None)
-                    deviation = None
-                else:
-                    deviation = smoother.update(compute_deviation(head_pose, baseline))
-                    result = timer.update(deviation.within(settings))
-
-                total_elapsed += dt
-                # Time spent away from the desk is neither good nor bad posture,
-                # so it must not drag the percentage down.
-                if result.status != Status.PAUSED:
-                    tracked_elapsed += dt
-                    if result.status == Status.OK:
-                        good_elapsed += dt
-                if result.status == Status.ALERT and prev_status != Status.ALERT:
-                    violation_count += 1
-                prev_status = result.status
-
-                if result.should_notify:
-                    send_notification(
-                        "Posture Tracker",
-                        f"You've been slouching for {result.violation_seconds:.0f}s — straighten up.",
-                    )
-
-                good_pct = (good_elapsed / tracked_elapsed * 100.0) if tracked_elapsed > 0 else 100.0
-                shared.set_show_overlay(result.status == Status.ALERT)
-
-                dashboard.update(
-                    DashboardState(
-                        status=result.status,
-                        violation_seconds=result.violation_seconds,
-                        session_seconds=total_elapsed,
-                        good_posture_pct=good_pct,
-                        violation_count=violation_count,
-                        deviation=deviation,
-                    )
-                )
-
-                elapsed = time.monotonic() - loop_start
-                sleep_time = frame_interval - elapsed
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-    finally:
-        # In the finally block so a crash mid-loop still records the session
-        # rather than silently losing it.
-        if calibrated and total_elapsed > 0:
+        with FaceSource(FACE_MODEL_PATH) as face_source:
+            # No dashboard when the output is a log file: Rich would fill it
+            # with redraw escape codes, and nobody is watching anyway.
+            dashboard = Dashboard() if show_dashboard else None
+            if dashboard:
+                dashboard.__enter__()
             try:
-                save_session(
-                    SessionSummary(
-                        started_at=session_start,
-                        duration_seconds=total_elapsed,
-                        good_posture_pct=good_pct,
-                        violation_count=violation_count,
-                    )
-                )
+                while not stop_event.is_set():
+                    loop_start = time.monotonic()
+                    dt = loop_start - last_time
+                    last_time = loop_start
+
+                    head_pose = _read_head_pose(cap, face_source)
+                    if head_pose is None:
+                        smoother.reset()
+                        result = timer.update(None)
+                        deviation = None
+                    else:
+                        deviation = smoother.update(compute_deviation(head_pose, baseline))
+                        result = timer.update(deviation.within(settings))
+
+                    total_elapsed += dt
+                    # Time spent away from the desk is neither good nor bad
+                    # posture, so it must not skew the percentage.
+                    if result.status != Status.PAUSED:
+                        tracked_elapsed += dt
+                        if result.status == Status.OK:
+                            good_elapsed += dt
+                    if result.status == Status.ALERT and prev_status != Status.ALERT:
+                        violation_count += 1
+                    prev_status = result.status
+
+                    if result.should_notify:
+                        send_notification(
+                            "Posture Tracker",
+                            f"You've been slouching for {result.violation_seconds:.0f}s — straighten up.",
+                        )
+
+                    shared.set_show_overlay(result.status == Status.ALERT)
+
+                    if dashboard:
+                        good_pct = (good_elapsed / tracked_elapsed * 100.0
+                                    if tracked_elapsed > 0 else 100.0)
+                        dashboard.update(DashboardState(
+                            status=result.status,
+                            violation_seconds=result.violation_seconds,
+                            session_seconds=total_elapsed,
+                            good_posture_pct=good_pct,
+                            violation_count=violation_count,
+                            deviation=deviation,
+                        ))
+
+                    elapsed = time.monotonic() - loop_start
+                    if (sleep_time := frame_interval - elapsed) > 0:
+                        time.sleep(sleep_time)
+            finally:
+                if dashboard:
+                    dashboard.__exit__(None, None, None)
+    finally:
+        # In the finally block so a crash mid-session still records it.
+        if total_elapsed > 0:
+            try:
+                save_session(SessionSummary(
+                    started_at=session_start,
+                    duration_seconds=total_elapsed,
+                    tracked_seconds=tracked_elapsed,
+                    good_seconds=good_elapsed,
+                    violation_count=violation_count,
+                ))
             except Exception as exc:  # storage must never block a clean shutdown
                 console.print(f"[yellow]Could not save session stats: {exc}[/yellow]")
         shared.set_show_overlay(False)
@@ -441,67 +410,141 @@ def run_capture_loop(
         stop_event.set()
 
 
-def main() -> None:
-    settings = parse_args(sys.argv[1:])
-    console = Console()
+def calibrate(cap, settings: Settings, console: Console) -> Baseline | None:
+    """Camera check, countdown, then sampling. Returns None if it failed."""
+    with FaceSource(FACE_MODEL_PATH) as face_source:
+        console.print(
+            "[bold]Step 1/2 — camera[/bold]  A preview will open. "
+            "Sit how you normally work; it closes itself once it can see you."
+        )
+        if not camera_check.run_preview(cap, face_source, timeout_seconds=120):
+            console.print(
+                "[yellow]Could not get a clear view of your head.[/yellow] "
+                "Aim the camera at yourself and try again."
+            )
+            return None
 
-    # Download before claiming the camera, so a slow first-run download does
-    # not hold the device open (and locked away from other apps) meanwhile.
+        console.print("[bold]Step 2/2 — calibration[/bold]  Sit the way you want to be reminded to sit.")
+        with Dashboard() as dashboard:
+            _run_countdown(dashboard, cap, settings)
+            baseline = _collect_baseline(dashboard, cap, face_source, settings)
+
+    if baseline is None:
+        console.print("[bold red]Calibration failed:[/bold red] no face detected while sampling.")
+    return baseline
+
+
+def cmd_setup(settings: Settings, console: Console, force_calibrate: bool) -> int:
+    """Default command: make sure the tracker is calibrated, installed and running."""
     try:
         ensure_face_model(console)
     except RuntimeError as exc:
         console.print(f"[bold red]{exc}[/bold red]")
-        sys.exit(1)
+        return 1
+
+    saved = storage.load_baseline()
+    if saved is not None and not force_calibrate:
+        service.install_autostart()
+        if service.running_pid() is not None:
+            console.print("[green]Posture Tracker is already running.[/green] "
+                          "Use --stats to see how you are doing, or --stop to turn it off.")
+            return 0
+        pid = service.start_background()
+        console.print(f"[green]Posture Tracker is watching again[/green] (pid {pid}).")
+        return 0
+
+    # A tracker already holding the camera would block calibration.
+    if service.stop_background():
+        console.print("Stopping the running tracker to recalibrate...")
+        time.sleep(1.0)
 
     try:
         cap = open_camera(settings.camera)
     except CameraError as exc:
         console.print(f"[bold red]{exc}[/bold red]")
-        sys.exit(1)
+        return 1
 
-    if settings.check_camera:
-        try:
-            with FaceSource(FACE_MODEL_PATH) as face_source:
-                framed = camera_check.run_preview(cap, face_source)
-        finally:
-            cap.release()
-        if framed:
-            console.print("[green]Camera looks good — run posture-tracker to start.[/green]")
-        else:
-            console.print(
-                "[yellow]Your head was never fully in frame.[/yellow] Tracking needs to see "
-                "your whole head, so aim the camera and run --check-camera again."
-            )
-        sys.exit(0 if framed else 1)
+    try:
+        baseline = calibrate(cap, settings, console)
+    finally:
+        cap.release()
 
+    if baseline is None:
+        return 1
+
+    storage.save_baseline(baseline.roll_deg, baseline.pitch_deg)
+    service.install_autostart()
+    pid = service.start_background()
+
+    console.print()
+    console.print("[bold green]All set.[/bold green]")
+    console.print(f"  Watching in the background (pid {pid}), and starting itself at every login.")
+    console.print("  [bold]posture-tracker --stats[/bold]  how your posture has been")
+    console.print("  [bold]posture-tracker --stop[/bold]   stop it and remove it from autostart")
+    return 0
+
+
+def cmd_stats(console: Console) -> int:
+    periods = storage.recent_stats()
+    console.print(ui.render_stats(periods))
+    if service.running_pid() is None:
+        console.print("[dim]Tracker is not running. Run posture-tracker to start it.[/dim]")
+    return 0
+
+
+def cmd_stop(console: Console) -> int:
+    was_running = service.stop_background()
+    was_installed = service.remove_autostart()
+    if was_running or was_installed:
+        console.print("[green]Stopped.[/green] Removed from autostart; "
+                      "run [bold]posture-tracker[/bold] to set it up again.")
+    else:
+        console.print("Posture Tracker was not running.")
+    return 0
+
+
+def cmd_foreground(settings: Settings, console: Console) -> int:
+    """The tracker itself. Started by autostart, or by hand to watch it live."""
+    if service.running_pid() is not None:
+        console.print("[yellow]Posture Tracker is already running.[/yellow]")
+        return 1
+
+    saved = storage.load_baseline()
+    if saved is None:
+        console.print("[bold red]Not calibrated yet.[/bold red] "
+                      "Run [bold]posture-tracker[/bold] first.")
+        return 1
+    baseline = Baseline(roll_deg=saved[0], pitch_deg=saved[1])
+
+    try:
+        ensure_face_model(console)
+        cap = open_camera(settings.camera)
+    except (RuntimeError, CameraError) as exc:
+        console.print(f"[bold red]{exc}[/bold red]")
+        return 1
+
+    service.write_pid_file()
     shared = SharedState()
     stop_event = threading.Event()
 
-    # SIGINT (Ctrl+C) is turned into KeyboardInterrupt by Python's default
-    # handler, but SIGTERM has no such default — and SIGTERM (not SIGINT) is
-    # how backgrounded/daemonized processes are normally stopped (`kill`,
-    # `systemctl stop`, session logout). Route it through the same stop_event
-    # the rest of shutdown already uses so the camera and overlay are always
-    # cleaned up, not just on Ctrl+C.
-    def _handle_sigterm(signum, frame) -> None:
-        stop_event.set()
-
-    signal.signal(signal.SIGTERM, _handle_sigterm)
+    # SIGINT (Ctrl+C) becomes KeyboardInterrupt by default, but SIGTERM has no
+    # such default -- and SIGTERM is how a background process is stopped
+    # (`--stop`, `kill`, logout). Route it through the same shutdown path so
+    # the camera and overlay are always cleaned up.
+    signal.signal(signal.SIGTERM, lambda *_: stop_event.set())
 
     thread = threading.Thread(
-        target=run_capture_loop,
-        args=(cap, settings, shared, stop_event),
+        target=run_tracking,
+        args=(cap, settings, baseline, shared, stop_event, sys.stdout.isatty()),
         daemon=True,
     )
     thread.start()
 
     root = overlay.make_root()
     ov = overlay.Overlay(root)
-
     try:
         overlay.run_poll_loop(
-            root,
-            ov,
+            root, ov,
             should_show_overlay=shared.get_show_overlay,
             should_stop=stop_event.is_set,
         )
@@ -514,6 +557,22 @@ def main() -> None:
             root.destroy()
         except Exception:
             pass
+        service.clear_pid_file()
+    return 0
+
+
+def main() -> None:
+    command = parse_args(sys.argv[1:])
+    settings = Settings()
+    console = Console()
+
+    if command.stats:
+        sys.exit(cmd_stats(console))
+    if command.stop:
+        sys.exit(cmd_stop(console))
+    if command.foreground:
+        sys.exit(cmd_foreground(settings, console))
+    sys.exit(cmd_setup(settings, console, force_calibrate=command.calibrate))
 
 
 if __name__ == "__main__":
