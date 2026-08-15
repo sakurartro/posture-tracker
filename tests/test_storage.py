@@ -2,10 +2,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from posture_tracker.storage import (
+    MAX_LEVEL,
     SessionSummary,
+    level_progress,
     load_baseline,
     load_sessions,
     period_stats,
+    points_earned,
     save_baseline,
     save_session,
 )
@@ -129,3 +132,38 @@ def test_load_baseline_survives_a_corrupt_file(tmp_path: Path):
     path = tmp_path / "baseline.json"
     path.write_text("{ not json")
     assert load_baseline(path=path) is None
+
+
+def test_points_earned_is_one_per_full_minute():
+    assert points_earned(0) == 0
+    assert points_earned(59) == 0  # partial minutes don't count
+    assert points_earned(60) == 1
+    assert points_earned(179) == 2
+
+
+def test_level_progress_starts_at_level_one_with_zero_points():
+    progress = level_progress(0)
+    assert progress.level == 1
+    assert progress.points_into_level == 0
+    assert progress.points_for_next_level == 50
+
+
+def test_level_progress_advances_at_each_threshold():
+    assert level_progress(49).level == 1
+    assert level_progress(50).level == 2
+    assert level_progress(199).level == 2
+    assert level_progress(200).level == 3
+
+
+def test_level_progress_caps_at_max_level():
+    progress = level_progress(1_000_000)
+    assert progress.level == MAX_LEVEL
+    assert progress.points_for_next_level is None
+    assert progress.progress_pct == 100.0
+
+
+def test_level_progress_pct_is_relative_to_current_level():
+    # Level 2 starts at 50 points and level 3 at 200, so 125 is halfway through.
+    progress = level_progress(125)
+    assert progress.level == 2
+    assert progress.progress_pct == 50.0

@@ -531,7 +531,9 @@ def cmd_setup(settings: Settings, console: Console, force_calibrate: bool) -> in
 
 def cmd_stats(console: Console) -> int:
     periods = storage.recent_stats()
-    console.print(ui.render_stats(periods))
+    all_time = periods[-1]
+    level = storage.level_progress(storage.points_earned(all_time.tracked_seconds))
+    console.print(ui.render_stats(periods, level))
     if service.running_pid() is None:
         console.print("[dim]Tracker is not running. Run posture-tracker to start it.[/dim]")
     return 0

@@ -175,6 +175,52 @@ def recent_stats(db_path: Path = DEFAULT_DB_PATH, now: datetime | None = None) -
     ]
 
 
+# One point per full minute spent tracked (in frame), win or lose on posture --
+# it rewards showing up, not just sitting straight. 20 levels, each needing
+# quadratically more points than the last so early levels come quickly while
+# the top ones are a real long-term goal: level 20 sits at 18050 points, i.e.
+# ~300 hours of tracked time.
+POINTS_PER_MINUTE = 1
+MAX_LEVEL = 20
+# LEVEL_THRESHOLDS[i] is the cumulative points needed to be at level i + 1.
+LEVEL_THRESHOLDS = [0] + [50 * n**2 for n in range(1, MAX_LEVEL)]
+
+
+@dataclass(frozen=True)
+class LevelProgress:
+    level: int
+    points: int
+    points_into_level: int
+    # Points still needed to reach the next level, or None at the max level.
+    points_for_next_level: int | None
+
+    @property
+    def progress_pct(self) -> float:
+        if self.points_for_next_level is None:
+            return 100.0
+        return self.points_into_level / self.points_for_next_level * 100.0
+
+
+def points_earned(tracked_seconds: float) -> int:
+    """Exactly one point per full minute tracked; partial minutes don't count."""
+    return int(tracked_seconds // 60)
+
+
+def level_progress(points: int) -> LevelProgress:
+    level = 1
+    for i, threshold in enumerate(LEVEL_THRESHOLDS):
+        if points >= threshold:
+            level = i + 1
+        else:
+            break
+
+    floor = LEVEL_THRESHOLDS[level - 1]
+    if level < MAX_LEVEL:
+        ceiling = LEVEL_THRESHOLDS[level]
+        return LevelProgress(level, points, points - floor, ceiling - floor)
+    return LevelProgress(level, points, points - floor, None)
+
+
 def save_baseline(roll_deg: float, pitch_deg: float, path: Path = BASELINE_PATH) -> None:
     """Stores the calibrated posture so later runs -- especially the one the
     desktop autostarts -- do not have to ask the user to calibrate again."""

@@ -11,6 +11,7 @@ from rich.table import Table
 from rich.text import Text
 
 from posture_tracker.detector import Deviation, Status
+from posture_tracker.storage import LevelProgress, MAX_LEVEL
 
 _STATUS_STYLE = {
     Status.OK: ("green", "[OK] Sitting straight"),
@@ -76,8 +77,29 @@ def _posture_style(pct: float) -> str:
     return "red"
 
 
-def render_stats(periods) -> Panel:
-    """A table of PeriodStats rows: today, week, month, all time."""
+def _progress_bar(pct: float, width: int = 20) -> str:
+    filled = round(width * min(max(pct, 0.0), 100.0) / 100.0)
+    return "█" * filled + "░" * (width - filled)
+
+
+def _level_panel(progress: LevelProgress) -> Panel:
+    body = Text()
+    body.append(f"Level {progress.level}/{MAX_LEVEL}", style="bold cyan")
+    body.append(f"   {progress.points} pts earned (1 pt / minute tracked)", style="dim")
+    if progress.points_for_next_level is None:
+        body.append("\nMax level reached!", style="bold green")
+    else:
+        bar = _progress_bar(progress.progress_pct)
+        body.append(
+            f"\n[{bar}] {progress.points_into_level}/{progress.points_for_next_level} "
+            "to next level"
+        )
+    return Panel(body, title="Level")
+
+
+def render_stats(periods, level: LevelProgress) -> Panel:
+    """A table of PeriodStats rows (today, week, month, all time) plus the
+    level earned from all-time tracked minutes."""
     table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
     table.add_column("Period")
     table.add_column("Tracked", justify="right")
@@ -98,7 +120,8 @@ def render_stats(periods) -> Panel:
             str(p.session_count),
         )
 
-    return Panel(table, title="Posture Tracker — statistics")
+    group = Group(table, _level_panel(level))
+    return Panel(group, title="Posture Tracker — statistics")
 
 
 def render_dashboard(state: DashboardState) -> Panel:
