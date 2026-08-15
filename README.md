@@ -2,8 +2,11 @@
 
 A real-time posture-tracking CLI app, using a webcam.
 Runs fully locally: MediaPipe Pose + OpenCV for detection, Rich for the
-terminal dashboard, and tkinter for a fullscreen warning overlay when bad
-posture persists too long.
+terminal dashboard, a desktop notification (`notify-send`) after a short
+continuous violation, and a fullscreen tkinter overlay if bad posture
+persists even longer. Designed to run in the background — a normal desktop
+notification doesn't need the terminal in focus, and the app shuts down
+cleanly on both Ctrl+C and `kill`/`systemctl stop` (SIGTERM).
 
 ## Install
 
@@ -38,7 +41,8 @@ slouching relative to your calibrated reference posture.
 |---|---|---|
 | `--camera` | `/dev/video0` | Camera device path or index |
 | `--calibration-seconds` | `3.0` | Calibration duration, seconds |
-| `--grace-period` | `7.0` | Seconds of continuous bad posture before the overlay fires |
+| `--notify-after` | `5.0` | Seconds of continuous bad posture before a desktop notification fires |
+| `--grace-period` | `10.0` | Seconds of continuous bad posture before the fullscreen overlay fires |
 | `--fps` | `12` | Analysis loop frame rate |
 | `--head-tilt-threshold` | `8.0` | Allowed head tilt deviation, degrees |
 | `--shoulder-tilt-threshold` | `10.0` | Allowed shoulder tilt deviation, degrees |
@@ -47,11 +51,32 @@ slouching relative to your calibrated reference posture.
 ## Dashboard statuses
 
 - **[OK]** — posture is good.
-- **[WARN N sec]** — a violation is in progress but hasn't exceeded the grace period yet.
-- **[ALERT]** — grace period exceeded, the fullscreen overlay is active.
+- **[WARN N sec]** — a violation is in progress but hasn't exceeded the overlay grace period yet.
+  Once it passes `--notify-after` (default 5s) a one-off desktop notification fires.
+- **[ALERT]** — `--grace-period` exceeded (default 10s), the fullscreen overlay is active.
 - **[PAUSED]** — no face detected in frame (user stepped away), timer reset.
 
-The overlay closes automatically once posture is corrected, or manually via `Esc`.
+There are two independent thresholds for the same continuous violation:
+a desktop notification at `--notify-after` seconds (quick heads-up, works
+even if you're not looking at the terminal), and the fullscreen overlay at
+`--grace-period` seconds (default is longer, since it's more disruptive).
+The overlay closes automatically once posture is corrected, or manually via
+`Esc`.
+
+## Running in the background
+
+The dashboard is nice to watch, but you don't need to: the desktop
+notification is what tells you about a violation, so the app is meant to
+be started once and left running in the background.
+
+```bash
+nohup posture-tracker > ~/.local/share/posture-tracker/run.log 2>&1 &
+disown
+```
+
+Stop it later with `pkill -INT -f posture-tracker` (or `kill <pid>`/
+`systemctl stop`, which sends SIGTERM) — either way the camera is released
+and the session is saved to SQLite before exit.
 
 ## Data
 
