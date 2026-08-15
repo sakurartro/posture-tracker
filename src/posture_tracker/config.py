@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 CALIBRATION_SECONDS = 3.0
-GRACE_PERIOD_SECONDS = 7.0
+# Seconds of continuous bad posture before a background desktop notification fires.
+NOTIFY_AFTER_SECONDS = 5.0
+# Seconds of continuous bad posture before the fullscreen overlay fires.
+GRACE_PERIOD_SECONDS = 10.0
 ANALYSIS_FPS = 12
 
 HEAD_TILT_THRESHOLD_DEG = 8.0
@@ -34,6 +37,7 @@ POSE_MODEL_PATH = Path.home() / ".local" / "share" / "posture-tracker" / "models
 class Settings:
     camera: str = DEFAULT_CAMERA_DEVICE
     calibration_seconds: float = CALIBRATION_SECONDS
+    notify_after_seconds: float = NOTIFY_AFTER_SECONDS
     grace_period_seconds: float = GRACE_PERIOD_SECONDS
     analysis_fps: int = ANALYSIS_FPS
     head_tilt_threshold_deg: float = HEAD_TILT_THRESHOLD_DEG
@@ -50,9 +54,12 @@ def parse_args(argv: list[str] | None = None) -> Settings:
                          help=f"Camera device path or index (default: {DEFAULT_CAMERA_DEVICE})")
     parser.add_argument("--calibration-seconds", type=float, default=CALIBRATION_SECONDS,
                          help="Seconds to hold still during calibration")
+    parser.add_argument("--notify-after", type=float, default=NOTIFY_AFTER_SECONDS,
+                         dest="notify_after_seconds",
+                         help="Seconds of continuous bad posture before a desktop notification fires")
     parser.add_argument("--grace-period", type=float, default=GRACE_PERIOD_SECONDS,
                          dest="grace_period_seconds",
-                         help="Seconds of continuous bad posture before the overlay fires")
+                         help="Seconds of continuous bad posture before the fullscreen overlay fires")
     parser.add_argument("--fps", type=int, default=ANALYSIS_FPS, dest="analysis_fps",
                          help="Analysis loop target frames per second")
     parser.add_argument("--head-tilt-threshold", type=float, default=HEAD_TILT_THRESHOLD_DEG,
